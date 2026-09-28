@@ -1,5 +1,5 @@
 // Herramientas MCP que se exponen a Claude.
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
@@ -10,26 +10,50 @@ import { formatScan, scanStorage, systemInfo } from './inspect.js';
 const text = (t) => ({ content: [{ type: 'text', text: t }] });
 const fail = (t) => ({ content: [{ type: 'text', text: t }], isError: true });
 
-/** Ejecuta un programa sin shell, con timeout y límite de salida. */
-export function runProgram(program, args, cfg, { input } = {}) {
+/**
+ * Ejecuta un programa sin shell, con timeout y límite de salida.
+ * Corre en su propio grupo de procesos: al vencer el tiempo se mata el grupo
+ * entero y se responde enseguida, aunque algún hijo (p. ej. de Termux:API)
+ * siga con las tuberías abiertas.
+ */
+export function runProgram(program, args, cfg, { input, timeoutMs } = {}) {
+  const limit = timeoutMs ?? cfg.commandTimeoutMs;
   return new Promise((resolve) => {
-    const child = execFile(program, args, {
-      cwd: cfg.workspace,
-      timeout: cfg.commandTimeoutMs,
-      maxBuffer: cfg.maxOutputBytes,
-      env: { ...process.env, TERMUX_MCP: '1' }
-    }, (err, stdout, stderr) => {
-      let code = 0;
-      let note = '';
-      if (err) {
-        if (err.code === 'ENOENT') return resolve({ code: 127, stdout: '', stderr: `No se encontró "${program}". ¿Está instalado?` });
-        if (err.killed) note = `\n[cortado: superó ${cfg.commandTimeoutMs} ms]`;
-        if (err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') note = `\n[salida recortada a ${cfg.maxOutputBytes} bytes]`;
-        code = typeof err.code === 'number' ? err.code : 1;
+    let out = Buffer.alloc(0), err = Buffer.alloc(0), done = false, note = '';
+    const finish = (r) => { if (!done) { done = true; clearTimeout(timer); resolve(r); } };
+    let child;
+    try {
+      child = spawn(program, args, { cwd: cfg.workspace, env: { ...process.env, TERMUX_MCP: '1' }, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (e) {
+      return resolve({ code: 1, stdout: '', stderr: e.message });
+    }
+    const killGroup = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* ya terminó */ } } };
+    const timer = setTimeout(() => {
+      killGroup();
+      finish({ code: 124, stdout: out.toString(), stderr: err.toString() + `\n[cortado: superó ${limit} ms]` });
+    }, limit);
+    const collect = (which) => (chunk) => {
+      if (which === 'out') out = Buffer.concat([out, chunk]); else err = Buffer.concat([err, chunk]);
+      if (out.length + err.length > cfg.maxOutputBytes && !note) {
+        note = `\n[salida recortada a ${cfg.maxOutputBytes} bytes]`;
+        killGroup();
       }
-      resolve({ code, stdout: String(stdout), stderr: String(stderr) + note });
+    };
+    child.stdout.on('data', collect('out'));
+    child.stderr.on('data', collect('err'));
+    child.on('error', (e) => finish(e.code === 'ENOENT'
+      ? { code: 127, stdout: '', stderr: `No se encontró "${program}". ¿Está instalado?` }
+      : { code: 1, stdout: '', stderr: e.message }));
+    child.on('exit', (code, signal) => {
+      // Dar un instante para vaciar las tuberías y no esperar a hijos colgados.
+      setTimeout(() => finish({
+        code: code ?? (signal ? 1 : 0),
+        stdout: out.subarray(0, cfg.maxOutputBytes).toString(),
+        stderr: err.toString() + note
+      }), 50);
     });
-    if (input !== undefined) child.stdin.end(input);
+    child.stdin.on('error', () => {});
+    if (input !== undefined) child.stdin.end(input); else child.stdin.end();
   });
 }
 
@@ -56,6 +80,10 @@ function wrap(name, cfg, fn) {
 }
 
 // Herramientas de Termux:API (requieren la app Termux:API y el paquete termux-api).
+const API_TIMEOUT_MS = 8000;
+const API_HINT = '\nTermux:API no respondió. En el celu: forzar detención de la app Termux:API, ponerla en batería "Sin restricciones" y abrirla una vez.';
+const apiResult = (r, okText) => r.code === 0 ? text(okText ?? (r.stdout || '(sin datos)')) : fail(formatRun(r) + (r.code === 124 ? API_HINT : ''));
+
 const TERMUX_API = [
   { name: 'battery_status', program: 'termux-battery-status', desc: 'Estado de la batería (nivel, carga, temperatura).' },
   { name: 'wifi_info', program: 'termux-wifi-connectioninfo', desc: 'Información de la conexión Wi-Fi actual.' },
@@ -79,7 +107,7 @@ export function buildServer(cfg) {
     annotations: { destructiveHint: false, openWorldHint: false }
   }, wrap('run_command', cfg, async ({ command }) => {
     const { program, args } = checkCommand(command, cfg);
-    const r = await runProgram(program, args, cfg);
+    const r = await runProgram(program, args, cfg, { timeoutMs: program.startsWith('termux-') ? API_TIMEOUT_MS : undefined });
     return r.code === 0 ? text(formatRun(r)) : fail(formatRun(r));
   }));
 
@@ -162,13 +190,13 @@ export function buildServer(cfg) {
     title: 'Datos del sistema',
     description: 'Modelo, versión de Android, parche de seguridad, chip, RAM, almacenamiento, tiempo encendido y batería.',
     annotations: ro
-  }, wrap('system_info', cfg, async () => text(await systemInfo((prog, args) => runProgram(prog, args, cfg)))));
+  }, wrap('system_info', cfg, async () => text(await systemInfo((prog, args) => runProgram(prog, args, cfg, { timeoutMs: prog.startsWith('termux-') ? API_TIMEOUT_MS : undefined })))));
 
   for (const t of TERMUX_API) {
     server.registerTool(t.name, { title: t.name, description: t.desc, annotations: ro },
       wrap(t.name, cfg, async () => {
-        const r = await runProgram(t.program, [], cfg);
-        return r.code === 0 ? text(r.stdout || '(sin datos)') : fail(formatRun(r));
+        const r = await runProgram(t.program, [], cfg, { timeoutMs: API_TIMEOUT_MS });
+        return apiResult(r);
       }));
   }
 
@@ -178,8 +206,8 @@ export function buildServer(cfg) {
     inputSchema: { title: z.string().max(100), content: z.string().max(1000) },
     annotations: { openWorldHint: false }
   }, wrap('notify', cfg, async ({ title, content }) => {
-    const r = await runProgram('termux-notification', ['--title', title, '--content', content], cfg);
-    return r.code === 0 ? text('Notificación enviada.') : fail(formatRun(r));
+    const r = await runProgram('termux-notification', ['--title', title, '--content', content], cfg, { timeoutMs: API_TIMEOUT_MS });
+    return apiResult(r, 'Notificación enviada.');
   }));
 
   server.registerTool('clipboard_set', {
@@ -188,8 +216,8 @@ export function buildServer(cfg) {
     inputSchema: { text: z.string().max(10000) },
     annotations: { openWorldHint: false }
   }, wrap('clipboard_set', cfg, async ({ text: value }) => {
-    const r = await runProgram('termux-clipboard-set', [], cfg, { input: value });
-    return r.code === 0 ? text('Copiado.') : fail(formatRun(r));
+    const r = await runProgram('termux-clipboard-set', [], cfg, { input: value, timeoutMs: API_TIMEOUT_MS });
+    return apiResult(r, 'Copiado.');
   }));
 
   server.registerTool('vibrate', {
@@ -198,8 +226,8 @@ export function buildServer(cfg) {
     inputSchema: { duration_ms: z.number().int().min(50).max(3000).default(500) },
     annotations: { openWorldHint: false }
   }, wrap('vibrate', cfg, async ({ duration_ms }) => {
-    const r = await runProgram('termux-vibrate', ['-d', String(duration_ms), '-f'], cfg);
-    return r.code === 0 ? text('Listo.') : fail(formatRun(r));
+    const r = await runProgram('termux-vibrate', ['-d', String(duration_ms), '-f'], cfg, { timeoutMs: API_TIMEOUT_MS });
+    return apiResult(r, 'Listo.');
   }));
 
   return server;
