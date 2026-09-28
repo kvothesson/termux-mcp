@@ -32,8 +32,3 @@ test('stdin input', async () => {
   assert.equal(r.stdout, 'text');
 });
 
-test('binary output', async () => {
-  const r = await runProgram('printf', ['\\x00\\x01\\xff'], cfg, { binary: true });
-  assert.ok(Buffer.isBuffer(r.stdout));
-  assert.deepEqual([...r.stdout], [0, 1, 255]);
-});

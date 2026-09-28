@@ -39,7 +39,5 @@
   "maxOutputBytes": 65536,
   "accessTokenTtlMin": 60,
   "refreshTokenTtlDays": 30,
-  "maxPinAttempts": 5,
-  "maxImageBytes": 31457280,
-  "imageMaxDimension": 1280
+  "maxPinAttempts": 5
 }

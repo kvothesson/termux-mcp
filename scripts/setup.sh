@@ -3,9 +3,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "==> Installing Termux packages (nodejs, cloudflared, termux-api, imagemagick)…"
+echo "==> Installing Termux packages (nodejs, cloudflared, termux-api)…"
 pkg update -y
-pkg install -y nodejs-lts cloudflared termux-api imagemagick
+pkg install -y nodejs-lts cloudflared termux-api
 
 echo "==> Installing Node dependencies…"
 npm install --omit=dev
@@ -35,7 +35,7 @@ mkdir -p ~/claude-workspace
 
 if [ ! -d ~/storage/shared ]; then
   echo
-  echo "==> READ access to the phone's storage (to analyze space, folders and images)."
+  echo "==> READ access to the phone's storage (to analyze space and folders)."
   echo "    Android will ask for permission: tap Allow."
   termux-setup-storage || true
 fi

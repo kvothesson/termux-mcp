@@ -6,7 +6,8 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { checkCommand, readableRoots, resolveInWorkspace, resolveReadable, SafetyError } from './safety.js';
 import { formatScan, human, recentFiles, scanStorage, systemInfo } from './inspect.js';
-import { IMAGE_EXTENSIONS, loadImage } from './images.js';
+
+const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif', 'bmp'];
 
 const text = (t) => ({ content: [{ type: 'text', text: t }] });
 const fail = (t) => ({ content: [{ type: 'text', text: t }], isError: true });
@@ -16,20 +17,19 @@ const fail = (t) => ({ content: [{ type: 'text', text: t }], isError: true });
  * It runs in its own process group: when time runs out the whole group is
  * killed and we answer right away, even if a child (e.g. from Termux:API)
  * still holds the pipes open.
- * With { binary: true }, stdout is returned as a Buffer.
  */
-export function runProgram(program, args, cfg, { input, timeoutMs, binary = false, maxBytes } = {}) {
+export function runProgram(program, args, cfg, { input, timeoutMs } = {}) {
   const limit = timeoutMs ?? cfg.commandTimeoutMs;
-  const cap = maxBytes ?? cfg.maxOutputBytes;
+  const cap = cfg.maxOutputBytes;
   return new Promise((resolve) => {
     let out = Buffer.alloc(0), err = Buffer.alloc(0), done = false, note = '';
-    const stdoutValue = () => (binary ? out.subarray(0, cap) : out.subarray(0, cap).toString());
+    const stdoutValue = () => out.subarray(0, cap).toString();
     const finish = (r) => { if (!done) { done = true; clearTimeout(timer); resolve(r); } };
     let child;
     try {
       child = spawn(program, args, { cwd: cfg.workspace, env: { ...process.env, TERMUX_MCP: '1' }, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (e) {
-      return resolve({ code: 1, stdout: binary ? Buffer.alloc(0) : '', stderr: e.message });
+      return resolve({ code: 1, stdout: '', stderr: e.message });
     }
     const killGroup = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* already gone */ } } };
     const timer = setTimeout(() => {
@@ -46,8 +46,8 @@ export function runProgram(program, args, cfg, { input, timeoutMs, binary = fals
     child.stdout.on('data', collect('out'));
     child.stderr.on('data', collect('err'));
     child.on('error', (e) => finish(e.code === 'ENOENT'
-      ? { code: 127, stdout: binary ? Buffer.alloc(0) : '', stderr: `"${program}" was not found. Is it installed?` }
-      : { code: 1, stdout: binary ? Buffer.alloc(0) : '', stderr: e.message }));
+      ? { code: 127, stdout: '', stderr: `"${program}" was not found. Is it installed?` }
+      : { code: 1, stdout: '', stderr: e.message }));
     child.on('exit', (code, signal) => {
       // Give the pipes a moment to drain, without waiting for hung children.
       setTimeout(() => finish({ code: code ?? (signal ? 1 : 0), stdout: stdoutValue(), stderr: err.toString() + note }), 50);
@@ -91,7 +91,7 @@ const TERMUX_API = [
 ];
 
 export function buildServer(cfg) {
-  const server = new McpServer({ name: 'termux-mcp', version: '0.3.0' });
+  const server = new McpServer({ name: 'termux-mcp', version: '0.3.1' });
   const ro = { readOnlyHint: true, openWorldHint: false };
   const roots = readableRoots(cfg);
   const rootsNote = roots.length
@@ -130,7 +130,7 @@ export function buildServer(cfg) {
 
   server.registerTool('read_file', {
     title: 'Read file',
-    description: `Reads a text file. Relative paths = workspace.${rootsNote} For images use view_image.`,
+    description: `Reads a text file. Relative paths = workspace.${rootsNote}`,
     inputSchema: { path: z.string() },
     annotations: ro
   }, wrap('read_file', cfg, async ({ path: p }) => {
@@ -161,18 +161,6 @@ export function buildServer(cfg) {
     const lines = files.map((f) => `${new Date(f.mtime).toISOString().replace('T', ' ').slice(0, 16)}  ${human(f.size).padStart(8)}  ${f.path}`);
     if (truncated) lines.push('NOTE: the search stopped early; older folders may not have been checked.');
     return text(lines.join('\n'));
-  }));
-
-  server.registerTool('view_image', {
-    title: 'View image',
-    description: `Shows an image from the phone so Claude can see it (${IMAGE_EXTENSIONS.join(', ')}). ` +
-      `Large photos are rotated and resized to at most ${cfg.imageMaxDimension}px. Use recent_files to find paths.${rootsNote}`,
-    inputSchema: { path: z.string().describe('Path of the image') },
-    annotations: ro
-  }, wrap('view_image', cfg, async ({ path: p }) => {
-    const file = resolveReadable(cfg, p);
-    const img = await loadImage(file, cfg, run);
-    return { content: [{ type: 'image', data: img.data, mimeType: img.mimeType }, { type: 'text', text: `${file}\n${img.note}` }] };
   }));
 
   if (cfg.allowWrite) {

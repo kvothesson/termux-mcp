@@ -1,6 +1,6 @@
 # termux-mcp
 
-An MCP server that runs on your Android phone (inside Termux) so Claude, from claude.ai or the Claude app, can act on the phone: run allowlisted commands, work with files in a workspace folder, read the phone's storage, look at images, and use a few phone features (battery, notifications, clipboard, vibration).
+An MCP server that runs on your Android phone (inside Termux) so Claude, from claude.ai or the Claude app, can act on the phone: run allowlisted commands, work with files in a workspace folder, read the phone's storage, and use a few phone features (battery, notifications, clipboard, vibration).
 
 ```
 Claude (claude.ai) ──HTTPS──> Cloudflare ──tunnel──> cloudflared (phone) ──> termux-mcp (127.0.0.1:8787)
@@ -14,8 +14,7 @@ The server only listens on the phone itself (127.0.0.1). The only way in from th
 |---|---|
 | `run_command` | Runs **allowlisted** commands, without a shell (no pipes, `;`, `>`, `$`) |
 | `list_dir`, `read_file` | Reads the workspace (`~/claude-workspace`) and, **read-only**, the phone's storage (`~/storage/shared`) |
-| `recent_files` | Newest files in a folder, optionally filtered by type (e.g. the latest WhatsApp images or screenshots) |
-| `view_image` | Lets Claude *see* a photo or screenshot. Auto-rotated and resized to 1280 px with ImageMagick |
+| `recent_files` | Newest files in a folder, optionally filtered by type (e.g. the latest downloads or WhatsApp documents) |
 | `storage_overview` | Where the space goes: per folder and per file type, largest files, large old files, likely duplicates |
 | `system_info` | Model, Android version, security patch, chip, RAM, storage, uptime, battery |
 | `write_file` | Creates or edits files in the workspace (can be disabled) |
@@ -23,7 +22,7 @@ The server only listens on the phone itself (127.0.0.1). The only way in from th
 | `battery_status`, `wifi_info`, `clipboard_get` | Phone data through Termux:API |
 | `notify`, `clipboard_set`, `vibrate` | Show a notification, copy text, vibrate |
 
-What it **cannot** do: tap the screen, control other apps, read other apps' private data (e.g. WhatsApp chats, which are encrypted), or see which apps use battery or RAM. Android does not allow that without root (ADB from a computer can do some of it).
+What it **cannot** do: look at images (only list them), tap the screen, control other apps, read other apps' private data (e.g. WhatsApp chats, which are encrypted), or see which apps use battery or RAM. Android does not allow that without root (ADB from a computer can do some of it).
 
 > **Reading a WhatsApp chat:** in WhatsApp open the chat → ⋮ → More → **Export chat** → *Without media* → save it to Downloads. Then ask Claude to read it.
 
@@ -51,7 +50,7 @@ What it **cannot** do: tap the screen, control other apps, read other apps' priv
    ./scripts/setup.sh
    ```
 
-   `setup.sh` installs Node, cloudflared, termux-api and ImageMagick, asks you to choose the **PIN** (at least 8 characters; a phrase is better) and runs `termux-setup-storage` to grant read access to storage (Android asks for permission: tap *Allow*).
+   `setup.sh` installs Node, cloudflared and termux-api, asks you to choose the **PIN** (at least 8 characters; a phrase is better) and runs `termux-setup-storage` to grant read access to storage (Android asks for permission: tap *Allow*).
 
 ## Usage
 
@@ -67,7 +66,7 @@ Connector URL:  https://random-words.trycloudflare.com/mcp
 
 1. In claude.ai → **Settings → Connectors → Add custom connector**, paste that URL. Leave *Client ID* and *Client Secret* empty.
 2. When connecting, the authorization page opens: type your PIN.
-3. In a conversation, enable the connector and ask Claude things: "how much battery do I have?", "analyze my storage", "show me my latest screenshot", "create notes/shopping.txt with…".
+3. In a conversation, enable the connector and ask Claude things: "how much battery do I have?", "analyze my storage", "what did I download last?", "create notes/shopping.txt with…".
 
 Stop: `./scripts/stop.sh`. Watch activity live: `tail -f ~/.termux-mcp/audit.log`.
 
@@ -79,8 +78,6 @@ git pull
 npm install --omit=dev
 ./scripts/start.sh
 ```
-
-If you installed before image support was added, also run `pkg install imagemagick`.
 
 ### The URL changes on every start
 
@@ -108,8 +105,6 @@ CF_TUNNEL_TOKEN=your-token ./scripts/start.sh
 | `allowDelete` | `false` | Enables `delete_file` |
 | `allowPathsOutsideWorkspace` | `false` | Allows any path in command arguments (not recommended) |
 | `commandTimeoutMs` | `15000` | Maximum time per command |
-| `imageMaxDimension` | `1280` | Longest side of images sent to Claude |
-| `maxImageBytes` | `31457280` | Largest image `view_image` will open (30 MB) |
 
 After changing the configuration: `./scripts/stop.sh && ./scripts/start.sh`.
 
@@ -125,7 +120,7 @@ After changing the configuration: `./scripts/stop.sh && ./scripts/start.sh`.
 ## Risks
 
 - You are exposing part of your phone to the internet. The PIN is what protects it: use a long one and don't share it.
-- With `readRoots` enabled, Claude can **read and view** everything in shared storage: photos, downloads, documents, WhatsApp media. That includes other people's messages and pictures. If you don't want that, set `"readRoots": []`.
+- With `readRoots` enabled, Claude can **read** everything in shared storage: downloads, documents, WhatsApp media (file names and text files). That includes files other people sent you. If you don't want that, set `"readRoots": []`.
 - Adding commands to the allowlist widens what can be done. Never add `sh`, `bash`, `node`, `python`, `rm`, `curl` or similar: that amounts to handing over a full terminal.
 - If the log shows something you didn't ask for, stop the server and revoke the tokens.
 
@@ -136,4 +131,4 @@ npm install
 npm test
 ```
 
-The tests cover path confinement, the command allowlist, hung-process handling, the full OAuth + PIN flow, the read-only storage, and image resizing (skipped if ImageMagick is not installed).
+The tests cover path confinement, the command allowlist, hung-process handling, the full OAuth + PIN flow, and the read-only storage.

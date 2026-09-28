@@ -29,10 +29,6 @@ export const DEFAULTS = {
   commandTimeoutMs: 15000,
   maxOutputBytes: 64 * 1024,
   maxFileBytes: 1024 * 1024,
-  // Largest image (before resizing) that view_image will open.
-  maxImageBytes: 30 * 1024 * 1024,
-  // Longest side, in pixels, of images sent to Claude.
-  imageMaxDimension: 1280,
   // Access token lifetime, in minutes.
   accessTokenTtlMin: 60,
   // Refresh token lifetime, in days.

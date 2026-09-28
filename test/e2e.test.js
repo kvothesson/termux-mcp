@@ -1,7 +1,6 @@
 // End-to-end test: OAuth registration, PIN, PKCE, tokens and MCP tool calls.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -12,7 +11,6 @@ import { DEFAULTS } from '../src/config.js';
 let server, base, cfg;
 const PIN = 'test-pin-123';
 const REDIRECT = 'https://claude.ai/api/mcp/auth_callback';
-const hasMagick = (() => { try { execFileSync('convert', ['-version']); return true; } catch { return false; } })();
 
 before(async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tmcp-'));
@@ -27,12 +25,10 @@ before(async () => {
   fs.writeFileSync(path.join(shared, 'Download/photo.jpg'), Buffer.alloc(3 * 1024 * 1024));
   fs.writeFileSync(path.join(shared, 'Download/app.apk'), Buffer.alloc(5 * 1024 * 1024));
   fs.writeFileSync(path.join(shared, 'Download/readme.txt'), 'shared text');
-  if (hasMagick) {
-    execFileSync('convert', ['-size', '3000x2000', 'xc:red', path.join(wa, 'IMG-old.jpg')]);
-    execFileSync('convert', ['-size', '400x300', 'xc:blue', path.join(wa, 'IMG-new.png')]);
-    const old = new Date(Date.now() - 86400 * 1000);
-    fs.utimesSync(path.join(wa, 'IMG-old.jpg'), old, old);
-  }
+  fs.writeFileSync(path.join(wa, 'IMG-old.jpg'), 'old');
+  fs.writeFileSync(path.join(wa, 'IMG-new.png'), 'new');
+  const old = new Date(Date.now() - 86400 * 1000);
+  fs.utimesSync(path.join(wa, 'IMG-old.jpg'), old, old);
   fs.mkdirSync(cfg.workspace);
   fs.mkdirSync(cfg.stateDir);
   fs.writeFileSync(path.join(cfg.workspace, 'hello.txt'), 'hello world\n');
@@ -119,7 +115,7 @@ test('full flow: PIN, token and tools', async () => {
 
   const list = await rpc(access_token, 'tools/list');
   const names = list.result.tools.map((t) => t.name);
-  for (const n of ['run_command', 'read_file', 'write_file', 'list_dir', 'recent_files', 'view_image', 'battery_status', 'notify', 'storage_overview', 'system_info']) {
+  for (const n of ['run_command', 'read_file', 'write_file', 'list_dir', 'recent_files', 'battery_status', 'notify', 'storage_overview', 'system_info']) {
     assert.ok(names.includes(n), n);
   }
   assert.ok(!names.includes('delete_file'), 'delete is off by default');
@@ -175,31 +171,19 @@ test('full flow: PIN, token and tools', async () => {
   assert.equal((await refresh()).status, 400);
 });
 
-test('recent files and images', { skip: !hasMagick && 'ImageMagick not installed' }, async () => {
+test('recent files', async () => {
   const { access_token } = await getToken();
   const call = (name, args) => rpc(access_token, 'tools/call', { name, arguments: args }).then((r) => r.result);
 
-  let r = await call('recent_files', { extensions: ['images'], limit: 5 });
+  const r = await call('recent_files', { extensions: ['images'], limit: 5 });
   assert.ok(!r.isError, r.content[0].text);
   const lines = r.content[0].text.split('\n');
   assert.match(lines[0], /IMG-new\.png/, 'newest first');
   assert.ok(lines.some((l) => /IMG-old\.jpg/.test(l)));
   assert.ok(!lines.some((l) => /app\.apk/.test(l)), 'filtered by extension');
 
-  const wa = path.join(cfg.shared, 'Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images');
-  r = await call('view_image', { path: path.join(wa, 'IMG-old.jpg') });
-  assert.ok(!r.isError, JSON.stringify(r).slice(0, 300));
-  assert.equal(r.content[0].type, 'image');
-  assert.equal(r.content[0].mimeType, 'image/jpeg');
-  const tmp = path.join(os.tmpdir(), `out-${process.pid}.jpg`);
-  fs.writeFileSync(tmp, Buffer.from(r.content[0].data, 'base64'));
-  const [w, h] = execFileSync('identify', ['-format', '%w %h', tmp]).toString().split(' ').map(Number);
-  assert.ok(w <= 1280 && h <= 1280 && w === 1280, `resized to ${w}x${h}`);
-
-  r = await call('view_image', { path: path.join(cfg.shared, 'Download/readme.txt') });
-  assert.ok(r.isError, 'text file is not an image');
-  r = await call('view_image', { path: '/etc/hostname.png' });
-  assert.ok(r.isError, 'outside allowed folders');
+  const tools = await rpc(access_token, 'tools/list');
+  assert.ok(!tools.result.tools.some((t) => t.name === 'view_image'), 'no image viewing');
 });
 
 test('lockout after several wrong PINs', async () => {
