@@ -1,0 +1,18 @@
+{
+  "port": 8787,
+  "pin": "CAMBIAR-ESTE-PIN",
+  "workspace": "~/claude-workspace",
+  "allowedCommands": [
+    "ls", "cat", "head", "tail", "wc", "grep", "find", "du", "df", "pwd",
+    "date", "uptime", "whoami", "uname", "echo", "stat", "file", "sort", "uniq",
+    "termux-battery-status", "termux-wifi-connectioninfo", "termux-telephony-deviceinfo"
+  ],
+  "allowWrite": true,
+  "allowDelete": false,
+  "allowPathsOutsideWorkspace": false,
+  "commandTimeoutMs": 15000,
+  "maxOutputBytes": 65536,
+  "accessTokenTtlMin": 60,
+  "refreshTokenTtlDays": 30,
+  "maxPinAttempts": 5
+}
