@@ -31,6 +31,19 @@ export function createApp(cfg) {
   // cloudflared se conecta desde localhost; confiar solo en ese proxy.
   app.set('trust proxy', 'loopback');
 
+  // Registro de cada pedido (sin cuerpos ni tokens) para diagnosticar la conexión.
+  app.use((req, res, next) => {
+    const t = Date.now();
+    const json = res.json.bind(res);
+    res.json = (body) => { if (body?.error) res.locals.err = `${body.error}${body.error_description ? ': ' + body.error_description : ''}`; return json(body); };
+    res.on('finish', () => {
+      const p = req.originalUrl.split('?')[0];
+      const q = p === '/authorize' ? ` scope=${req.query.scope ?? '-'} resource=${req.query.resource ?? '-'}` : '';
+      console.log(`[${new Date().toISOString()}] ${req.method} ${p} -> ${res.statusCode} (${Date.now() - t} ms)${q}${res.locals.err ? ' ERROR ' + (typeof res.locals.err === 'string' ? res.locals.err : JSON.stringify(res.locals.err)) : ''}`);
+    });
+    next();
+  });
+
   app.get('/health', (_req, res) => res.json({ ok: true }));
 
   app.use(mcpAuthRouter({
