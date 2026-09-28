@@ -67,12 +67,36 @@ export class PinOAuthProvider {
 
   // Shows the page where the PIN is typed.
   async authorize(client, params, res) {
+    this.prunePending();
     const id = token();
-    this.pending.set(id, { client, params, expiresAt: now() + 600 });
-    res.status(200).type('html').send(this.page({ id, clientName: client.client_name || client.client_id }));
+    const p = { client, params, expiresAt: now() + 600 };
+    this.pending.set(id, p);
+    this.sendPage(res, 200, this.page({ id, p }));
   }
 
-  page({ id, clientName, error }) {
+  // Drops expired PIN requests and caps how many can be open at once, so
+  // repeated /authorize calls cannot grow memory without bound.
+  prunePending() {
+    const t = now();
+    for (const [k, v] of this.pending) if (v.expiresAt < t) this.pending.delete(k);
+    while (this.pending.size >= 100) this.pending.delete(this.pending.keys().next().value);
+  }
+
+  // The PIN page must never be framed (clickjacking) or cached. No form-action:
+  // browsers apply it to the redirect after /approve, which would block claude.ai.
+  sendPage(res, status, html) {
+    res.status(status)
+      .set('X-Frame-Options', 'DENY')
+      .set('Content-Security-Policy', "frame-ancestors 'none'; default-src 'none'; style-src 'unsafe-inline'")
+      .set('Cache-Control', 'no-store')
+      .set('Referrer-Policy', 'no-referrer')
+      .type('html').send(html);
+  }
+
+  page({ id, p, error }) {
+    const clientName = p.client.client_name || p.client.client_id;
+    let dest = '';
+    try { dest = new URL(p.params.redirectUri).host; } catch { /* shown as unknown */ }
     return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize access</title>
 <style>body{font-family:system-ui,sans-serif;max-width:420px;margin:40px auto;padding:0 16px;color:#222}
@@ -80,7 +104,8 @@ h1{font-size:1.3rem}input,button{font-size:1.1rem;width:100%;padding:12px;box-si
 button{background:#1a73e8;color:#fff;border:0;border-radius:8px}.err{color:#b00020}.warn{background:#fff4e5;padding:10px;border-radius:8px}</style></head>
 <body><h1>Authorize access to your phone</h1>
 <p><b>${escapeHtml(clientName)}</b> wants to run tools on your phone (allowlisted commands, the workspace folder and read-only access to storage).</p>
-<p class="warn">Only enter the PIN if you added this connector yourself.</p>
+<p>Access will be sent to: <b>${escapeHtml(dest || 'unknown')}</b></p>
+<p class="warn">Only enter the PIN if you added this connector yourself and the address above is the one you expect (for claude.ai: <b>claude.ai</b>).</p>
 ${error ? `<p class="err">${escapeHtml(error)}</p>` : ''}
 <form method="post" action="/approve"><input type="hidden" name="id" value="${escapeHtml(id)}">
 <input type="password" name="pin" placeholder="PIN" autocomplete="off" autofocus required>
@@ -102,12 +127,12 @@ ${error ? `<p class="err">${escapeHtml(error)}</p>` : ''}
       return res.status(400).type('text').send('Request expired. Connect again from Claude.');
     }
     if (this.locked()) {
-      return res.status(429).type('html').send(this.page({ id, clientName: p.client.client_name, error: 'Too many attempts. Wait 15 minutes.' }));
+      return this.sendPage(res, 429, this.page({ id, p, error: 'Too many attempts. Wait 15 minutes.' }));
     }
     if (!pin || !safeEqual(pin, this.cfg.pin)) {
       this.failures.push(Date.now());
       this.cfg.audit?.({ event: 'pin_failed' });
-      return res.status(401).type('html').send(this.page({ id, clientName: p.client.client_name, error: 'Wrong PIN.' }));
+      return this.sendPage(res, 401, this.page({ id, p, error: 'Wrong PIN.' }));
     }
     this.pending.delete(id);
     const code = token();

@@ -29,6 +29,7 @@ What it **cannot** do: look at images (only list them), tap the screen, control 
 ## Security
 
 - **OAuth with a PIN**: when connecting, claude.ai opens a page where you type your PIN. No PIN, no access.
+- The PIN page shows where access will be sent (for claude.ai: `claude.ai`) and cannot be embedded in another site.
 - 5 wrong PINs → approvals are locked for 15 minutes.
 - Tokens are stored only as hashes; 60-minute access tokens, 30-day refresh tokens with rotation.
 - Command allowlist, and options that could write or execute are blocked in every form — spaced, `--long=…` or glued to the flag (`find -exec`/`-delete`, `sort -o`/`--compress-program`, `file -f`, and a write output operand for `uniq`).
@@ -105,6 +106,10 @@ CF_TUNNEL_TOKEN=your-token ./scripts/start.sh
 | `allowDelete` | `false` | Enables `delete_file` |
 | `allowPathsOutsideWorkspace` | `false` | Allows any path in command arguments (not recommended) |
 | `commandTimeoutMs` | `15000` | Maximum time per command |
+| `maxOutputBytes` | `65536` | Maximum command output returned to Claude |
+| `maxFileBytes` | `1048576` | Largest file `read_file`/`write_file` will handle |
+| `accessTokenTtlMin` / `refreshTokenTtlDays` | `60` / `30` | Token lifetimes |
+| `maxPinAttempts` | `5` | Wrong PINs before approvals lock for 15 minutes |
 
 After changing the configuration: `./scripts/stop.sh && ./scripts/start.sh`.
 

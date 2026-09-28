@@ -26,6 +26,8 @@ export const DEFAULTS = {
   ],
   allowWrite: true,
   allowDelete: false,
+  // Lets command arguments point anywhere (not recommended).
+  allowPathsOutsideWorkspace: false,
   commandTimeoutMs: 15000,
   maxOutputBytes: 64 * 1024,
   maxFileBytes: 1024 * 1024,

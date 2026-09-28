@@ -7,6 +7,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { checkCommand, readableRoots, resolveInWorkspace, resolveReadable, SafetyError } from './safety.js';
 import { formatScan, human, recentFiles, scanStorage, systemInfo } from './inspect.js';
 
+const { version } = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif', 'bmp'];
 
 const text = (t) => ({ content: [{ type: 'text', text: t }] });
@@ -91,7 +93,7 @@ const TERMUX_API = [
 ];
 
 export function buildServer(cfg) {
-  const server = new McpServer({ name: 'termux-mcp', version: '0.3.1' });
+  const server = new McpServer({ name: 'termux-mcp', version });
   const ro = { readOnlyHint: true, openWorldHint: false };
   const roots = readableRoots(cfg);
   const rootsNote = roots.length

@@ -57,7 +57,11 @@ async function getToken() {
   const verifier = crypto.randomBytes(32).toString('base64url');
   const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
   const q = new URLSearchParams({ response_type: 'code', client_id: reg.client_id, redirect_uri: REDIRECT, code_challenge: challenge, code_challenge_method: 'S256', state: 'xyz' });
-  const page = await fetch(`${base}/authorize?${q}`).then((r) => r.text());
+  const res = await fetch(`${base}/authorize?${q}`);
+  assert.equal(res.headers.get('x-frame-options'), 'DENY');
+  assert.match(res.headers.get('content-security-policy'), /frame-ancestors 'none'/);
+  const page = await res.text();
+  assert.match(page, /sent to: <b>claude\.ai<\/b>/, 'shows where the code goes');
   const id = page.match(/name="id" value="([^"]+)"/)[1];
 
   const bad = await fetch(`${base}/approve`, { method: 'POST', body: new URLSearchParams({ id, pin: 'wrong' }), redirect: 'manual' });
@@ -112,6 +116,8 @@ test('full flow: PIN, token and tools', async () => {
 
   const init = await rpc(access_token, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } });
   assert.equal(init.result.serverInfo.name, 'termux-mcp');
+  const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(init.result.serverInfo.version, pkg.version);
 
   const list = await rpc(access_token, 'tools/list');
   const names = list.result.tools.map((t) => t.name);
@@ -202,4 +208,16 @@ test('lockout after several wrong PINs', async () => {
   // Still locked, even with the right PIN.
   const ok = await fetch(`${base}/approve`, { method: 'POST', body: new URLSearchParams({ id, pin: PIN }), redirect: 'manual' });
   assert.equal(ok.status, 429);
+});
+
+test('pending PIN requests are capped', async () => {
+  const reg = await fetch(`${base}/register`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ client_name: 'Flood', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' })
+  }).then((r) => r.json());
+  const { provider } = createApp({ ...cfg });
+  for (let i = 0; i < 150; i++) {
+    await provider.authorize(reg, { redirectUri: REDIRECT, codeChallenge: 'x'.repeat(43) }, { status() { return this; }, set() { return this; }, type() { return this; }, send() {} });
+  }
+  assert.ok(provider.pending.size <= 100, `pending=${provider.pending.size}`);
 });

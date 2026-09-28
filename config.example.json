@@ -37,6 +37,7 @@
   "allowPathsOutsideWorkspace": false,
   "commandTimeoutMs": 15000,
   "maxOutputBytes": 65536,
+  "maxFileBytes": 1048576,
   "accessTokenTtlMin": 60,
   "refreshTokenTtlDays": 30,
   "maxPinAttempts": 5
