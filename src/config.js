@@ -1,5 +1,5 @@
-// Carga y valida la configuración (config.json en la raíz del proyecto
-// o la ruta indicada en TERMUX_MCP_CONFIG).
+// Loads and validates the configuration (config.json at the project root,
+// or the path given in TERMUX_MCP_CONFIG).
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,14 +10,14 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const DEFAULTS = {
   port: 8787,
   host: '127.0.0.1',
-  // Carpeta a la que se limitan las herramientas de archivos y el cwd de los comandos.
+  // The only folder with write access, and the working directory for commands.
   workspace: '~/claude-workspace',
-  // Carpetas extra que se pueden LEER (nunca escribir). ~/storage/shared aparece
-  // después de correr termux-setup-storage y es el almacenamiento interno del celu.
+  // Extra folders that can be READ (never written). ~/storage/shared appears
+  // after running termux-setup-storage and is the phone's internal storage.
   readRoots: ['~/storage/shared'],
-  // Carpeta de estado (clientes OAuth, tokens, log de auditoría).
+  // State folder (OAuth clients, tokens, audit log).
   stateDir: '~/.termux-mcp',
-  // Solo estos programas se pueden ejecutar con run_command.
+  // Only these programs can be run with run_command.
   allowedCommands: [
     'ls', 'cat', 'head', 'tail', 'wc', 'grep', 'find', 'du', 'df', 'pwd',
     'date', 'uptime', 'whoami', 'uname', 'echo', 'stat', 'file', 'sort', 'uniq',
@@ -29,11 +29,15 @@ export const DEFAULTS = {
   commandTimeoutMs: 15000,
   maxOutputBytes: 64 * 1024,
   maxFileBytes: 1024 * 1024,
-  // Minutos de vida del access token.
+  // Largest image (before resizing) that view_image will open.
+  maxImageBytes: 30 * 1024 * 1024,
+  // Longest side, in pixels, of images sent to Claude.
+  imageMaxDimension: 1280,
+  // Access token lifetime, in minutes.
   accessTokenTtlMin: 60,
-  // Días de vida del refresh token.
+  // Refresh token lifetime, in days.
   refreshTokenTtlDays: 30,
-  // Intentos fallidos de PIN antes de bloquear la aprobación por 15 minutos.
+  // Failed PIN attempts before approval is locked for 15 minutes.
   maxPinAttempts: 5
 };
 
@@ -60,14 +64,14 @@ export function loadConfig(overrides = {}) {
   cfg.stateDir = path.resolve(expandHome(cfg.stateDir));
 
   if (!cfg.pin || String(cfg.pin).length < 8) {
-    throw new Error('Falta "pin" en config.json (mínimo 8 caracteres). Es la clave que vas a escribir para autorizar a Claude.');
+    throw new Error('Missing "pin" in config.json (at least 8 characters). It is the code you type to authorize Claude.');
   }
   if (!cfg.publicUrl) {
-    throw new Error('Falta la URL pública (PUBLIC_URL). Usá scripts/start.sh, que la obtiene del túnel.');
+    throw new Error('Missing the public URL (PUBLIC_URL). Use scripts/start.sh, which gets it from the tunnel.');
   }
   const u = new URL(cfg.publicUrl);
   if (u.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(u.hostname)) {
-    throw new Error('PUBLIC_URL tiene que ser https.');
+    throw new Error('PUBLIC_URL must be https.');
   }
   cfg.publicUrl = u.origin;
 

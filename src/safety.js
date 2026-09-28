@@ -1,20 +1,22 @@
-// Reglas de seguridad: rutas dentro de la carpeta de trabajo y lista blanca de comandos.
+// Safety rules: paths confined to allowed folders, and a command allowlist.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 export class SafetyError extends Error {}
 
+const isInside = (root, p) => p === root || p.startsWith(root + path.sep);
+
 /**
- * Resuelve `p` relativo a la carpeta de trabajo y garantiza que el resultado
- * (siguiendo symlinks) quede dentro de ella.
+ * Resolves `p` relative to the workspace and guarantees that the result
+ * (following symlinks) stays inside it. Used for anything that WRITES.
  */
 export function resolveInWorkspace(workspace, p = '.') {
-  if (typeof p !== 'string' || p.includes('\0')) throw new SafetyError('Ruta inválida.');
+  if (typeof p !== 'string' || p.includes('\0')) throw new SafetyError('Invalid path.');
   const root = fs.realpathSync(workspace);
   const target = path.resolve(root, p.startsWith('~') ? '.' + p.slice(1) : p);
 
-  // Resolver symlinks del tramo que ya existe (el archivo puede no existir todavía).
+  // Resolve symlinks in the part that already exists (the file may not exist yet).
   let existing = target;
   const tail = [];
   while (!fs.existsSync(existing)) {
@@ -26,29 +28,27 @@ export function resolveInWorkspace(workspace, p = '.') {
   const real = path.join(fs.realpathSync(existing), ...tail);
 
   if (!isInside(root, real)) {
-    throw new SafetyError(`La ruta "${p}" queda fuera de la carpeta de trabajo.`);
+    throw new SafetyError(`Path "${p}" is outside the workspace.`);
   }
   return real;
 }
 
-const isInside = (root, p) => p === root || p.startsWith(root + path.sep);
-
-/** Carpetas de solo lectura que existen, ya resueltas (siguiendo symlinks). */
+/** Read-only folders that exist, already resolved (following symlinks). */
 export function readableRoots(cfg) {
   const roots = [];
   for (const r of cfg.readRoots || []) {
     const abs = r === '~' ? os.homedir() : r.startsWith('~/') ? path.join(os.homedir(), r.slice(2)) : r;
-    try { roots.push(fs.realpathSync(abs)); } catch { /* no existe (p. ej. falta termux-setup-storage) */ }
+    try { roots.push(fs.realpathSync(abs)); } catch { /* does not exist (e.g. termux-setup-storage not run yet) */ }
   }
   return roots;
 }
 
 /**
- * Resuelve una ruta para LEER. Relativa = carpeta de trabajo. Absoluta o con "~/"
- * = tiene que caer dentro de la carpeta de trabajo o de una carpeta de solo lectura.
+ * Resolves a path for READING. Relative = workspace. Absolute or "~/" = must fall
+ * inside the workspace or one of the read-only folders.
  */
 export function resolveReadable(cfg, p = '.') {
-  if (typeof p !== 'string' || p.includes('\0')) throw new SafetyError('Ruta inválida.');
+  if (typeof p !== 'string' || p.includes('\0')) throw new SafetyError('Invalid path.');
   const ws = fs.realpathSync(cfg.workspace);
   let target;
   if (p === '~' || p.startsWith('~/')) target = path.join(os.homedir(), p.slice(1));
@@ -57,12 +57,12 @@ export function resolveReadable(cfg, p = '.') {
   let real;
   try { real = fs.realpathSync(target); } catch { real = path.resolve(target); }
   if (isInside(ws, real) || readableRoots(cfg).some((r) => isInside(r, real))) return real;
-  throw new SafetyError(`La ruta "${p}" está fuera de las carpetas permitidas (carpeta de trabajo y ${(cfg.readRoots || []).join(', ') || 'ninguna de lectura'}).`);
+  throw new SafetyError(`Path "${p}" is outside the allowed folders (workspace and ${(cfg.readRoots || []).join(', ') || 'no read-only folders'}).`);
 }
 
-/** Divide una línea de comando en argumentos (comillas simples/dobles, sin shell). */
+/** Splits a command line into arguments (single/double quotes, no shell). */
 export function splitArgs(line) {
-  if (typeof line !== 'string') throw new SafetyError('Comando inválido.');
+  if (typeof line !== 'string') throw new SafetyError('Invalid command.');
   const args = [];
   let cur = '';
   let quote = null;
@@ -80,18 +80,18 @@ export function splitArgs(line) {
     } else if (/\s/.test(c)) {
       if (has) { args.push(cur); cur = ''; has = false; }
     } else if ('|&;<>`$()'.includes(c)) {
-      throw new SafetyError(`Carácter no permitido: "${c}". No hay shell: sin pipes, redirecciones ni variables.`);
+      throw new SafetyError(`Character not allowed: "${c}". There is no shell: no pipes, redirections or variables.`);
     } else {
       cur += c; has = true;
     }
   }
-  if (quote) throw new SafetyError('Comillas sin cerrar.');
+  if (quote) throw new SafetyError('Unclosed quotes.');
   if (has) args.push(cur);
-  if (args.length === 0) throw new SafetyError('Comando vacío.');
+  if (args.length === 0) throw new SafetyError('Empty command.');
   return args;
 }
 
-// Opciones que convierten un comando "inofensivo" en uno que ejecuta, borra o escribe.
+// Options that turn a "harmless" command into one that executes, deletes or writes.
 const DANGEROUS_FLAGS = {
   find: ['-exec', '-execdir', '-ok', '-okdir', '-delete', '-fprint', '-fprint0', '-fprintf', '-fls'],
   sort: ['-o', '--output'],
@@ -103,19 +103,19 @@ function looksLikePath(a) {
 }
 
 /**
- * Valida un comando contra la lista blanca y devuelve { program, args } listo para execFile.
- * Los argumentos que parecen rutas se fuerzan a quedar dentro de la carpeta de trabajo.
+ * Checks a command against the allowlist and returns { program, args } ready to spawn.
+ * Arguments that look like paths must fall inside the allowed folders.
  */
 export function checkCommand(line, cfg) {
   const [program, ...args] = splitArgs(line);
-  if (program.includes('/')) throw new SafetyError('Usá el nombre del programa, no una ruta.');
+  if (program.includes('/')) throw new SafetyError('Use the program name, not a path.');
   if (!cfg.allowedCommands.includes(program)) {
-    throw new SafetyError(`"${program}" no está en la lista blanca. Permitidos: ${cfg.allowedCommands.join(', ')}`);
+    throw new SafetyError(`"${program}" is not on the allowlist. Allowed: ${cfg.allowedCommands.join(', ')}`);
   }
   const banned = DANGEROUS_FLAGS[program] || [];
   for (const a of args) {
     const flag = a.split('=')[0];
-    if (banned.includes(flag)) throw new SafetyError(`La opción "${flag}" no está permitida con ${program}.`);
+    if (banned.includes(flag)) throw new SafetyError(`Option "${flag}" is not allowed with ${program}.`);
     if (!cfg.allowPathsOutsideWorkspace) {
       const value = a.startsWith('-') && a.includes('=') ? a.slice(a.indexOf('=') + 1) : a;
       if (!a.startsWith('-') || a.includes('=')) {

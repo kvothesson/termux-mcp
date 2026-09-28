@@ -1,5 +1,5 @@
-// Servidor OAuth 2.1 mínimo (con PKCE y registro dinámico de clientes) para que
-// claude.ai pueda conectarse. La aprobación se hace escribiendo un PIN en una página.
+// Minimal OAuth 2.1 server (PKCE + dynamic client registration) so claude.ai
+// can connect. Access is approved by typing a PIN on a web page.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -17,13 +17,13 @@ function safeEqual(a, b) {
 
 const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-/** Estado persistente en disco: clientes registrados y tokens (guardados como hash). */
+/** Persistent on-disk state: registered clients and tokens (stored only as hashes). */
 class Store {
   constructor(dir) {
     this.file = path.join(dir, 'oauth-state.json');
     this.data = { clients: {}, access: {}, refresh: {} };
     if (fs.existsSync(this.file)) {
-      try { this.data = { ...this.data, ...JSON.parse(fs.readFileSync(this.file, 'utf8')) }; } catch { /* estado corrupto: empezar de cero */ }
+      try { this.data = { ...this.data, ...JSON.parse(fs.readFileSync(this.file, 'utf8')) }; } catch { /* corrupt state: start fresh */ }
     }
     this.prune();
   }
@@ -49,8 +49,8 @@ export class PinOAuthProvider {
   constructor(cfg) {
     this.cfg = cfg;
     this.store = new Store(cfg.stateDir);
-    this.codes = new Map(); // código -> { clientId, challenge, redirectUri, scopes, resource, expiresAt }
-    this.pending = new Map(); // id de pedido -> { client, params, expiresAt }
+    this.codes = new Map(); // code -> { clientId, challenge, redirectUri, scopes, resource, expiresAt }
+    this.pending = new Map(); // request id -> { client, params, expiresAt }
     this.failures = [];
 
     const store = this.store;
@@ -65,7 +65,7 @@ export class PinOAuthProvider {
     };
   }
 
-  // Muestra la página donde se escribe el PIN.
+  // Shows the page where the PIN is typed.
   async authorize(client, params, res) {
     const id = token();
     this.pending.set(id, { client, params, expiresAt: now() + 600 });
@@ -73,18 +73,18 @@ export class PinOAuthProvider {
   }
 
   page({ id, clientName, error }) {
-    return `<!doctype html><html lang="es"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Autorizar acceso</title>
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize access</title>
 <style>body{font-family:system-ui,sans-serif;max-width:420px;margin:40px auto;padding:0 16px;color:#222}
 h1{font-size:1.3rem}input,button{font-size:1.1rem;width:100%;padding:12px;box-sizing:border-box;margin-top:8px}
 button{background:#1a73e8;color:#fff;border:0;border-radius:8px}.err{color:#b00020}.warn{background:#fff4e5;padding:10px;border-radius:8px}</style></head>
-<body><h1>Autorizar acceso a tu celular</h1>
-<p><b>${escapeHtml(clientName)}</b> quiere ejecutar herramientas en tu celular (comandos de la lista blanca y archivos de la carpeta de trabajo).</p>
-<p class="warn">Escribí el PIN solo si fuiste vos quien agregó este conector.</p>
+<body><h1>Authorize access to your phone</h1>
+<p><b>${escapeHtml(clientName)}</b> wants to run tools on your phone (allowlisted commands, the workspace folder and read-only access to storage).</p>
+<p class="warn">Only enter the PIN if you added this connector yourself.</p>
 ${error ? `<p class="err">${escapeHtml(error)}</p>` : ''}
 <form method="post" action="/approve"><input type="hidden" name="id" value="${escapeHtml(id)}">
 <input type="password" name="pin" placeholder="PIN" autocomplete="off" autofocus required>
-<button type="submit">Autorizar</button></form></body></html>`;
+<button type="submit">Authorize</button></form></body></html>`;
   }
 
   locked() {
@@ -93,21 +93,21 @@ ${error ? `<p class="err">${escapeHtml(error)}</p>` : ''}
     return this.failures.length >= this.cfg.maxPinAttempts;
   }
 
-  // Maneja el envío del formulario del PIN.
+  // Handles the PIN form submission.
   approve(req, res) {
     const { id, pin } = req.body || {};
     const p = this.pending.get(id);
     if (!p || p.expiresAt < now()) {
       this.pending.delete(id);
-      return res.status(400).type('text').send('Pedido vencido. Volvé a conectar desde Claude.');
+      return res.status(400).type('text').send('Request expired. Connect again from Claude.');
     }
     if (this.locked()) {
-      return res.status(429).type('html').send(this.page({ id, clientName: p.client.client_name, error: 'Demasiados intentos. Esperá 15 minutos.' }));
+      return res.status(429).type('html').send(this.page({ id, clientName: p.client.client_name, error: 'Too many attempts. Wait 15 minutes.' }));
     }
     if (!pin || !safeEqual(pin, this.cfg.pin)) {
       this.failures.push(Date.now());
       this.cfg.audit?.({ event: 'pin_failed' });
-      return res.status(401).type('html').send(this.page({ id, clientName: p.client.client_name, error: 'PIN incorrecto.' }));
+      return res.status(401).type('html').send(this.page({ id, clientName: p.client.client_name, error: 'Wrong PIN.' }));
     }
     this.pending.delete(id);
     const code = token();
@@ -128,7 +128,7 @@ ${error ? `<p class="err">${escapeHtml(error)}</p>` : ''}
 
   async challengeForAuthorizationCode(client, code) {
     const c = this.codes.get(code);
-    if (!c || c.clientId !== client.client_id || c.expiresAt < now()) throw new InvalidGrantError('Código inválido o vencido.');
+    if (!c || c.clientId !== client.client_id || c.expiresAt < now()) throw new InvalidGrantError('Invalid or expired code.');
     return c.challenge;
   }
 
@@ -146,23 +146,23 @@ ${error ? `<p class="err">${escapeHtml(error)}</p>` : ''}
 
   async exchangeAuthorizationCode(client, code, _verifier, redirectUri) {
     const c = this.codes.get(code);
-    this.codes.delete(code); // un solo uso
-    if (!c || c.clientId !== client.client_id || c.expiresAt < now()) throw new InvalidGrantError('Código inválido o vencido.');
-    if (redirectUri && redirectUri !== c.redirectUri) throw new InvalidGrantError('redirect_uri no coincide.');
+    this.codes.delete(code); // single use
+    if (!c || c.clientId !== client.client_id || c.expiresAt < now()) throw new InvalidGrantError('Invalid or expired code.');
+    if (redirectUri && redirectUri !== c.redirectUri) throw new InvalidGrantError('redirect_uri does not match.');
     return this.issue(client.client_id, c.scopes, c.resource);
   }
 
   async exchangeRefreshToken(client, refreshToken, scopes) {
     const key = sha(refreshToken);
     const r = this.store.data.refresh[key];
-    if (!r || r.clientId !== client.client_id || r.expiresAt < now()) throw new InvalidGrantError('Refresh token inválido.');
-    delete this.store.data.refresh[key]; // rotación
+    if (!r || r.clientId !== client.client_id || r.expiresAt < now()) throw new InvalidGrantError('Invalid refresh token.');
+    delete this.store.data.refresh[key]; // rotation
     return this.issue(client.client_id, scopes?.length ? scopes : r.scopes, r.resource);
   }
 
   async verifyAccessToken(accessToken) {
     const a = this.store.data.access[sha(accessToken)];
-    if (!a || a.expiresAt < now()) throw new InvalidTokenError('Token inválido o vencido.');
+    if (!a || a.expiresAt < now()) throw new InvalidTokenError('Invalid or expired token.');
     return { token: accessToken, clientId: a.clientId, scopes: a.scopes, expiresAt: a.expiresAt, resource: a.resource ? new URL(a.resource) : undefined };
   }
 

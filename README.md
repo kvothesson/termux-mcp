@@ -1,43 +1,48 @@
 # termux-mcp
 
-Servidor MCP que corre en tu celular Android (dentro de Termux) para que Claude, desde claude.ai o la app, pueda ejecutar acciones en el celu: comandos de una lista blanca, archivos de una carpeta de trabajo y algunas funciones del teléfono (batería, notificaciones, portapapeles, vibrar).
+An MCP server that runs on your Android phone (inside Termux) so Claude, from claude.ai or the Claude app, can act on the phone: run allowlisted commands, work with files in a workspace folder, read the phone's storage, look at images, and use a few phone features (battery, notifications, clipboard, vibration).
 
 ```
-Claude (claude.ai) ──HTTPS──> Cloudflare ──túnel──> cloudflared (celu) ──> termux-mcp (127.0.0.1:8787)
+Claude (claude.ai) ──HTTPS──> Cloudflare ──tunnel──> cloudflared (phone) ──> termux-mcp (127.0.0.1:8787)
 ```
 
-El servidor solo escucha en el propio celu (127.0.0.1). La única entrada desde internet es el túnel de Cloudflare, que sale desde el celu: no hace falta abrir puertos y funciona con datos móviles.
+The server only listens on the phone itself (127.0.0.1). The only way in from the internet is the Cloudflare tunnel, which is opened *from* the phone: no ports to open, and it works on mobile data.
 
-## Qué puede hacer Claude
+## What Claude can do
 
-| Herramienta | Qué hace |
+| Tool | What it does |
 |---|---|
-| `run_command` | Ejecuta comandos de la **lista blanca**, sin shell (sin pipes, `;`, `>`, `$`) |
-| `list_dir`, `read_file` | Lee la carpeta de trabajo (`~/claude-workspace`) y, en **solo lectura**, el almacenamiento del celu (`~/storage/shared`) |
-| `storage_overview` | Resume el almacenamiento: espacio por carpeta y por tipo, archivos más grandes, grandes y viejos, posibles duplicados |
-| `system_info` | Modelo, Android, parche de seguridad, chip, RAM, disco, tiempo encendido, batería |
-| `write_file` | Crea o modifica archivos en la carpeta de trabajo (se puede apagar) |
-| `delete_file` | Borra archivos. **Apagado por defecto** (`allowDelete`) |
-| `battery_status`, `wifi_info`, `clipboard_get` | Datos del celu vía Termux:API |
-| `notify`, `clipboard_set`, `vibrate` | Notificación, copiar texto, vibrar |
+| `run_command` | Runs **allowlisted** commands, without a shell (no pipes, `;`, `>`, `$`) |
+| `list_dir`, `read_file` | Reads the workspace (`~/claude-workspace`) and, **read-only**, the phone's storage (`~/storage/shared`) |
+| `recent_files` | Newest files in a folder, optionally filtered by type (e.g. the latest WhatsApp images or screenshots) |
+| `view_image` | Lets Claude *see* a photo or screenshot. Auto-rotated and resized to 1280 px with ImageMagick |
+| `storage_overview` | Where the space goes: per folder and per file type, largest files, large old files, likely duplicates |
+| `system_info` | Model, Android version, security patch, chip, RAM, storage, uptime, battery |
+| `write_file` | Creates or edits files in the workspace (can be disabled) |
+| `delete_file` | Deletes workspace files. **Off by default** (`allowDelete`) |
+| `battery_status`, `wifi_info`, `clipboard_get` | Phone data through Termux:API |
+| `notify`, `clipboard_set`, `vibrate` | Show a notification, copy text, vibrate |
 
-No puede tocar la pantalla, manejar otras apps, ver datos internos de otras apps ni qué apps gastan batería o RAM: Android no lo permite sin root (con ADB desde una PC sí).
+What it **cannot** do: tap the screen, control other apps, read other apps' private data (e.g. WhatsApp chats, which are encrypted), or see which apps use battery or RAM. Android does not allow that without root (ADB from a computer can do some of it).
 
-## Seguridad
+> **Reading a WhatsApp chat:** in WhatsApp open the chat → ⋮ → More → **Export chat** → *Without media* → save it to Downloads. Then ask Claude to read it.
 
-- **OAuth con PIN**: al conectar, claude.ai te abre una página donde escribís tu PIN. Sin eso no hay acceso.
-- 5 PIN incorrectos → bloqueo de 15 minutos.
-- Tokens guardados solo como hash; access token de 60 min, refresh token de 30 días con rotación.
-- Lista blanca de comandos y bloqueo de opciones peligrosas (`find -exec`, `-delete`, etc.).
-- Escritura solo en la carpeta de trabajo. El almacenamiento del celu (`readRoots`) es de **solo lectura**; cualquier otra ruta está bloqueada, incluso en argumentos de comandos (también se controlan los symlinks).
-- Log de todo lo que se ejecuta en `~/.termux-mcp/audit.log`.
-- **Kill switch**: `./scripts/stop.sh` apaga todo al instante.
+## Security
 
-## Instalación (todo desde el celu)
+- **OAuth with a PIN**: when connecting, claude.ai opens a page where you type your PIN. No PIN, no access.
+- 5 wrong PINs → approvals are locked for 15 minutes.
+- Tokens are stored only as hashes; 60-minute access tokens, 30-day refresh tokens with rotation.
+- Command allowlist, and dangerous options are blocked (`find -exec`, `-delete`, etc.).
+- Writes only inside the workspace. The phone storage (`readRoots`) is **read-only**; every other path is blocked, including in command arguments (symlinks are checked too).
+- Every tool call is logged to `~/.termux-mcp/audit.log`.
+- Hung commands (e.g. an unresponsive Termux:API) are killed on a timeout instead of blocking the server.
+- **Kill switch**: `./scripts/stop.sh` shuts everything down instantly.
 
-1. Instalá **F-Droid** (f-droid.org) y desde ahí **Termux** y **Termux:API**. No uses las versiones de Play Store: están desactualizadas.
-2. Abrí Termux:API una vez y aceptá los permisos que pida.
-3. En Termux:
+## Install (everything from the phone)
+
+1. Install **F-Droid** (f-droid.org) and, from it, **Termux** and **Termux:API**. Don't use the Play Store versions: they are outdated, and both apps must come from the same source.
+2. Open Termux:API once.
+3. In Termux:
 
    ```bash
    pkg install -y git
@@ -46,74 +51,89 @@ No puede tocar la pantalla, manejar otras apps, ver datos internos de otras apps
    ./scripts/setup.sh
    ```
 
-   El repo es privado: `git clone` te pide usuario y contraseña. La contraseña **no** es la de tu cuenta: es un token que creás en github.com → Settings → Developer settings → Personal access tokens → *Fine-grained*, con acceso de solo lectura a este repo.
+   `setup.sh` installs Node, cloudflared, termux-api and ImageMagick, asks you to choose the **PIN** (at least 8 characters; a phrase is better) and runs `termux-setup-storage` to grant read access to storage (Android asks for permission: tap *Allow*).
 
-   `setup.sh` instala Node, cloudflared y termux-api, te pide que elijas el **PIN** (mínimo 8 caracteres; mejor una frase) y corre `termux-setup-storage` para dar acceso de lectura al almacenamiento (Android pide permiso: tocá *Permitir*).
-
-## Uso
+## Usage
 
 ```bash
 ./scripts/start.sh
 ```
 
-Te muestra algo como:
+It prints something like:
 
 ```
-URL del conector:  https://palabras-al-azar.trycloudflare.com/mcp
+Connector URL:  https://random-words.trycloudflare.com/mcp
 ```
 
-1. En claude.ai → **Configuración → Conectores → Agregar conector personalizado**, pegá esa URL.
-2. Al conectar se abre la página de autorización: escribí tu PIN.
-3. En una conversación, activá el conector y pedile cosas a Claude: "¿cuánta batería tengo?", "creá notas/compras.txt con…".
+1. In claude.ai → **Settings → Connectors → Add custom connector**, paste that URL. Leave *Client ID* and *Client Secret* empty.
+2. When connecting, the authorization page opens: type your PIN.
+3. In a conversation, enable the connector and ask Claude things: "how much battery do I have?", "analyze my storage", "show me my latest screenshot", "create notes/shopping.txt with…".
 
-Apagar: `./scripts/stop.sh`. Ver actividad en vivo: `tail -f ~/.termux-mcp/audit.log`.
+Stop: `./scripts/stop.sh`. Watch activity live: `tail -f ~/.termux-mcp/audit.log`.
 
-### La URL cambia en cada inicio
-
-El túnel rápido de Cloudflare no requiere cuenta pero da una URL nueva cada vez: hay que editar el conector con la URL nueva. Para una URL fija, creá un túnel con nombre en Cloudflare (cuenta gratis + un dominio), poné `"publicUrl": "https://tu-dominio"` en `config.json` y arrancá con:
+### Updating
 
 ```bash
-CF_TUNNEL_TOKEN=tu-token ./scripts/start.sh
+./scripts/stop.sh
+git pull
+npm install --omit=dev
+./scripts/start.sh
 ```
 
-### Que Android no lo mate
+If you installed before image support was added, also run `pkg install imagemagick`.
 
-- `start.sh` activa `termux-wake-lock`.
-- En Ajustes → Apps → Termux → Batería, elegí **Sin restricciones**.
-- Encendelo solo cuando lo uses: gasta batería.
+### The URL changes on every start
 
-## Configuración (`config.json`)
+Cloudflare's quick tunnel needs no account but gives a new URL each time, so the connector has to be removed and added again with the new URL (Settings → Connectors). For a fixed URL, create a named tunnel in Cloudflare (free account + a domain), set `"publicUrl": "https://your-domain"` in `config.json` and start with:
 
-| Clave | Por defecto | |
+```bash
+CF_TUNNEL_TOKEN=your-token ./scripts/start.sh
+```
+
+### Keeping Android from killing it
+
+- `start.sh` enables `termux-wake-lock`.
+- In Settings → Apps → **Termux** and **Termux:API** → Battery, choose **Unrestricted**.
+- Only run it while you use it: it costs battery.
+
+## Configuration (`config.json`)
+
+| Key | Default | |
 |---|---|---|
-| `pin` | — | Obligatorio, mínimo 8 caracteres |
-| `workspace` | `~/claude-workspace` | Única carpeta con escritura |
-| `readRoots` | `["~/storage/shared"]` | Carpetas de solo lectura. `[]` para quitar el acceso al almacenamiento |
-| `allowedCommands` | `ls`, `cat`, `grep`, … | Lista blanca |
-| `allowWrite` | `true` | Habilita `write_file` |
-| `allowDelete` | `false` | Habilita `delete_file` |
-| `allowPathsOutsideWorkspace` | `false` | Permite rutas fuera de la carpeta en los comandos (no recomendado) |
-| `commandTimeoutMs` | `15000` | Tiempo máximo por comando |
+| `pin` | — | Required, at least 8 characters |
+| `workspace` | `~/claude-workspace` | The only folder with write access |
+| `readRoots` | `["~/storage/shared"]` | Read-only folders. `[]` removes access to the phone storage |
+| `allowedCommands` | `ls`, `cat`, `grep`, … | Command allowlist |
+| `allowWrite` | `true` | Enables `write_file` |
+| `allowDelete` | `false` | Enables `delete_file` |
+| `allowPathsOutsideWorkspace` | `false` | Allows any path in command arguments (not recommended) |
+| `commandTimeoutMs` | `15000` | Maximum time per command |
+| `imageMaxDimension` | `1280` | Longest side of images sent to Claude |
+| `maxImageBytes` | `31457280` | Largest image `view_image` will open (30 MB) |
 
-Después de cambiar la configuración: `./scripts/stop.sh && ./scripts/start.sh`.
+After changing the configuration: `./scripts/stop.sh && ./scripts/start.sh`.
 
-## Si algo sale mal
+## Troubleshooting
 
-- **Cortar todo**: `./scripts/stop.sh`.
-- **Revocar el acceso de Claude** (tendrá que volver a pedir el PIN): `npm run revoke` y reiniciar.
-- **Cambiar el PIN**: editá `config.json` y reiniciá.
-- Logs: `~/.termux-mcp/run/server.log` y `~/.termux-mcp/run/tunnel.log`.
+- **"Could not sign in" / no PIN page**: check `tail -30 ~/.termux-mcp/run/server.log`; every request is logged. Make sure the connector uses the *current* URL.
+- **502 Bad Gateway**: the tunnel dropped (common with patchy mobile signal). Restart with `stop.sh` + `start.sh` and update the connector URL.
+- **Termux:API commands hang** (`termux-battery-status` never returns): force-stop Termux:API, set its battery usage to *Unrestricted*, open it once. Cancel a hung command in Termux with **Volume Down + C**.
+- **Revoke Claude's access** (it will have to ask for the PIN again): `npm run revoke`, then restart.
+- **Change the PIN**: edit `config.json` and restart.
+- Logs: `~/.termux-mcp/run/server.log` and `~/.termux-mcp/run/tunnel.log`.
 
-## Riesgos
+## Risks
 
-- Estás exponiendo parte de tu celu a internet. El PIN es lo que lo protege: usá uno largo y no lo compartas.
-- Con `readRoots` activo, Claude puede **leer** todo el almacenamiento compartido: fotos, descargas, documentos, backups de WhatsApp. Si no querés eso, poné `"readRoots": []`.
-- Agregar comandos a la lista blanca amplía lo que se puede hacer. Nunca agregues `sh`, `bash`, `node`, `python`, `rm`, `curl` ni similares: equivalen a darle una terminal completa.
-- Si ves en el log algo que no pediste, apagalo y revocá los tokens.
+- You are exposing part of your phone to the internet. The PIN is what protects it: use a long one and don't share it.
+- With `readRoots` enabled, Claude can **read and view** everything in shared storage: photos, downloads, documents, WhatsApp media. That includes other people's messages and pictures. If you don't want that, set `"readRoots": []`.
+- Adding commands to the allowlist widens what can be done. Never add `sh`, `bash`, `node`, `python`, `rm`, `curl` or similar: that amounts to handing over a full terminal.
+- If the log shows something you didn't ask for, stop the server and revoke the tokens.
 
-## Desarrollo
+## Development
 
 ```bash
 npm install
 npm test
 ```
+
+The tests cover path confinement, the command allowlist, hung-process handling, the full OAuth + PIN flow, the read-only storage, and image resizing (skipped if ImageMagick is not installed).

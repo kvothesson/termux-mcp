@@ -1,56 +1,56 @@
-// Herramientas MCP que se exponen a Claude.
+// MCP tools exposed to Claude.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { checkCommand, readableRoots, resolveInWorkspace, resolveReadable, SafetyError } from './safety.js';
-import { formatScan, scanStorage, systemInfo } from './inspect.js';
+import { formatScan, human, recentFiles, scanStorage, systemInfo } from './inspect.js';
+import { IMAGE_EXTENSIONS, loadImage } from './images.js';
 
 const text = (t) => ({ content: [{ type: 'text', text: t }] });
 const fail = (t) => ({ content: [{ type: 'text', text: t }], isError: true });
 
 /**
- * Ejecuta un programa sin shell, con timeout y límite de salida.
- * Corre en su propio grupo de procesos: al vencer el tiempo se mata el grupo
- * entero y se responde enseguida, aunque algún hijo (p. ej. de Termux:API)
- * siga con las tuberías abiertas.
+ * Runs a program without a shell, with a timeout and an output limit.
+ * It runs in its own process group: when time runs out the whole group is
+ * killed and we answer right away, even if a child (e.g. from Termux:API)
+ * still holds the pipes open.
+ * With { binary: true }, stdout is returned as a Buffer.
  */
-export function runProgram(program, args, cfg, { input, timeoutMs } = {}) {
+export function runProgram(program, args, cfg, { input, timeoutMs, binary = false, maxBytes } = {}) {
   const limit = timeoutMs ?? cfg.commandTimeoutMs;
+  const cap = maxBytes ?? cfg.maxOutputBytes;
   return new Promise((resolve) => {
     let out = Buffer.alloc(0), err = Buffer.alloc(0), done = false, note = '';
+    const stdoutValue = () => (binary ? out.subarray(0, cap) : out.subarray(0, cap).toString());
     const finish = (r) => { if (!done) { done = true; clearTimeout(timer); resolve(r); } };
     let child;
     try {
       child = spawn(program, args, { cwd: cfg.workspace, env: { ...process.env, TERMUX_MCP: '1' }, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (e) {
-      return resolve({ code: 1, stdout: '', stderr: e.message });
+      return resolve({ code: 1, stdout: binary ? Buffer.alloc(0) : '', stderr: e.message });
     }
-    const killGroup = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* ya terminó */ } } };
+    const killGroup = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* already gone */ } } };
     const timer = setTimeout(() => {
       killGroup();
-      finish({ code: 124, stdout: out.toString(), stderr: err.toString() + `\n[cortado: superó ${limit} ms]` });
+      finish({ code: 124, stdout: stdoutValue(), stderr: err.toString() + `\n[stopped: exceeded ${limit} ms]` });
     }, limit);
     const collect = (which) => (chunk) => {
       if (which === 'out') out = Buffer.concat([out, chunk]); else err = Buffer.concat([err, chunk]);
-      if (out.length + err.length > cfg.maxOutputBytes && !note) {
-        note = `\n[salida recortada a ${cfg.maxOutputBytes} bytes]`;
+      if (out.length + err.length > cap && !note) {
+        note = `\n[output truncated to ${cap} bytes]`;
         killGroup();
       }
     };
     child.stdout.on('data', collect('out'));
     child.stderr.on('data', collect('err'));
     child.on('error', (e) => finish(e.code === 'ENOENT'
-      ? { code: 127, stdout: '', stderr: `No se encontró "${program}". ¿Está instalado?` }
-      : { code: 1, stdout: '', stderr: e.message }));
+      ? { code: 127, stdout: binary ? Buffer.alloc(0) : '', stderr: `"${program}" was not found. Is it installed?` }
+      : { code: 1, stdout: binary ? Buffer.alloc(0) : '', stderr: e.message }));
     child.on('exit', (code, signal) => {
-      // Dar un instante para vaciar las tuberías y no esperar a hijos colgados.
-      setTimeout(() => finish({
-        code: code ?? (signal ? 1 : 0),
-        stdout: out.subarray(0, cfg.maxOutputBytes).toString(),
-        stderr: err.toString() + note
-      }), 50);
+      // Give the pipes a moment to drain, without waiting for hung children.
+      setTimeout(() => finish({ code: code ?? (signal ? 1 : 0), stdout: stdoutValue(), stderr: err.toString() + note }), 50);
     });
     child.stdin.on('error', () => {});
     if (input !== undefined) child.stdin.end(input); else child.stdin.end();
@@ -60,10 +60,10 @@ export function runProgram(program, args, cfg, { input, timeoutMs } = {}) {
 function formatRun({ code, stdout, stderr }) {
   let out = stdout;
   if (stderr.trim()) out += (out ? '\n' : '') + `[stderr]\n${stderr}`;
-  return `[código de salida: ${code}]\n${out || '(sin salida)'}`;
+  return `[exit code: ${code}]\n${out || '(no output)'}`;
 }
 
-/** Envuelve cada herramienta: registra en el log y convierte errores en respuestas. */
+/** Wraps every tool: logs to the audit log and turns exceptions into tool errors. */
 function wrap(name, cfg, fn) {
   return async (args) => {
     const started = Date.now();
@@ -72,163 +72,189 @@ function wrap(name, cfg, fn) {
       cfg.audit?.({ event: 'tool', tool: name, args, ok: !result.isError, ms: Date.now() - started });
       return result;
     } catch (e) {
-      const msg = e instanceof SafetyError ? `Bloqueado: ${e.message}` : `Error: ${e.message}`;
+      const msg = e instanceof SafetyError ? `Blocked: ${e.message}` : `Error: ${e.message}`;
       cfg.audit?.({ event: 'tool', tool: name, args, ok: false, error: e.message, ms: Date.now() - started });
       return fail(msg);
     }
   };
 }
 
-// Herramientas de Termux:API (requieren la app Termux:API y el paquete termux-api).
+// Termux:API tools (need the Termux:API app and the termux-api package).
 const API_TIMEOUT_MS = 8000;
-const API_HINT = '\nTermux:API no respondió. En el celu: forzar detención de la app Termux:API, ponerla en batería "Sin restricciones" y abrirla una vez.';
-const apiResult = (r, okText) => r.code === 0 ? text(okText ?? (r.stdout || '(sin datos)')) : fail(formatRun(r) + (r.code === 124 ? API_HINT : ''));
+const API_HINT = '\nTermux:API did not respond. On the phone: force-stop the Termux:API app, set its battery usage to "Unrestricted" and open it once.';
+const apiResult = (r, okText) => r.code === 0 ? text(okText ?? (r.stdout || '(no data)')) : fail(formatRun(r) + (r.code === 124 ? API_HINT : ''));
 
 const TERMUX_API = [
-  { name: 'battery_status', program: 'termux-battery-status', desc: 'Estado de la batería (nivel, carga, temperatura).' },
-  { name: 'wifi_info', program: 'termux-wifi-connectioninfo', desc: 'Información de la conexión Wi-Fi actual.' },
-  { name: 'clipboard_get', program: 'termux-clipboard-get', desc: 'Lee el texto del portapapeles.' }
+  { name: 'battery_status', program: 'termux-battery-status', desc: 'Battery status (level, charging, temperature).' },
+  { name: 'wifi_info', program: 'termux-wifi-connectioninfo', desc: 'Information about the current Wi-Fi connection.' },
+  { name: 'clipboard_get', program: 'termux-clipboard-get', desc: 'Reads the text in the clipboard.' }
 ];
 
 export function buildServer(cfg) {
-  const server = new McpServer({ name: 'termux-mcp', version: '0.2.0' });
+  const server = new McpServer({ name: 'termux-mcp', version: '0.3.0' });
   const ro = { readOnlyHint: true, openWorldHint: false };
   const roots = readableRoots(cfg);
   const rootsNote = roots.length
-    ? ` También se puede LEER (no escribir) usando rutas absolutas dentro de: ${roots.join(', ')} (almacenamiento del celu).`
-    : ' No hay carpetas extra de lectura (falta correr termux-setup-storage).';
+    ? ` Absolute paths inside ${roots.join(', ')} (the phone's storage) can also be READ, never written.`
+    : ' There are no extra read-only folders (termux-setup-storage has not been run).';
+  const run = (prog, args, opts = {}) => runProgram(prog, args, cfg, { timeoutMs: prog.startsWith('termux-') ? API_TIMEOUT_MS : undefined, ...opts });
 
   server.registerTool('run_command', {
-    title: 'Ejecutar comando',
-    description: `Ejecuta un comando de la lista blanca en el celular (sin shell: no hay pipes, redirecciones ni variables). ` +
-      `El directorio actual es la carpeta de trabajo (${cfg.workspace}).${rootsNote} ` +
-      `Permitidos: ${cfg.allowedCommands.join(', ')}.`,
-    inputSchema: { command: z.string().describe('Ej.: "ls -la notas"') },
+    title: 'Run command',
+    description: 'Runs an allowlisted command on the phone (no shell: no pipes, redirections or variables). ' +
+      `The working directory is the workspace (${cfg.workspace}).${rootsNote} ` +
+      `Allowed: ${cfg.allowedCommands.join(', ')}.`,
+    inputSchema: { command: z.string().describe('E.g. "ls -la notes"') },
     annotations: { destructiveHint: false, openWorldHint: false }
   }, wrap('run_command', cfg, async ({ command }) => {
     const { program, args } = checkCommand(command, cfg);
-    const r = await runProgram(program, args, cfg, { timeoutMs: program.startsWith('termux-') ? API_TIMEOUT_MS : undefined });
+    const r = await run(program, args);
     return r.code === 0 ? text(formatRun(r)) : fail(formatRun(r));
   }));
 
   server.registerTool('list_dir', {
-    title: 'Listar carpeta',
-    description: `Lista una carpeta. Rutas relativas = carpeta de trabajo.${rootsNote}`,
-    inputSchema: { path: z.string().default('.').describe('Relativa a la carpeta de trabajo, o absoluta dentro de una carpeta de lectura') },
+    title: 'List folder',
+    description: `Lists a folder. Relative paths = workspace.${rootsNote}`,
+    inputSchema: { path: z.string().default('.').describe('Relative to the workspace, or absolute inside a read-only folder') },
     annotations: ro
   }, wrap('list_dir', cfg, async ({ path: p }) => {
     const dir = resolveReadable(cfg, p);
     const entries = fs.readdirSync(dir, { withFileTypes: true }).map((d) => {
       const full = path.join(dir, d.name);
       let size = '';
-      try { if (d.isFile()) size = ` (${fs.statSync(full).size} B)`; } catch { /* ignorar */ }
-      return `${d.isDirectory() ? '[carpeta] ' : ''}${d.name}${size}`;
+      try { if (d.isFile()) size = ` (${fs.statSync(full).size} B)`; } catch { /* ignore */ }
+      return `${d.isDirectory() ? '[dir] ' : ''}${d.name}${size}`;
     });
-    return text(entries.length ? entries.join('\n') : '(vacía)');
+    return text(entries.length ? entries.join('\n') : '(empty)');
   }));
 
   server.registerTool('read_file', {
-    title: 'Leer archivo',
-    description: `Lee un archivo de texto. Rutas relativas = carpeta de trabajo.${rootsNote}`,
+    title: 'Read file',
+    description: `Reads a text file. Relative paths = workspace.${rootsNote} For images use view_image.`,
     inputSchema: { path: z.string() },
     annotations: ro
   }, wrap('read_file', cfg, async ({ path: p }) => {
     const file = resolveReadable(cfg, p);
     const st = fs.statSync(file);
-    if (!st.isFile()) return fail('No es un archivo.');
-    if (st.size > cfg.maxFileBytes) return fail(`El archivo pesa ${st.size} B; el máximo es ${cfg.maxFileBytes} B.`);
+    if (!st.isFile()) return fail('Not a file.');
+    if (st.size > cfg.maxFileBytes) return fail(`The file is ${st.size} B; the limit is ${cfg.maxFileBytes} B.`);
     return text(fs.readFileSync(file, 'utf8'));
+  }));
+
+  server.registerTool('recent_files', {
+    title: 'Recent files',
+    description: 'Lists the most recently modified files in a folder (recursive), newest first, optionally filtered by extension. ' +
+      'Useful folders inside the phone storage: DCIM/Camera (camera), Pictures/Screenshots or DCIM/Screenshots (screenshots), ' +
+      'Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images (WhatsApp photos), Download.',
+    inputSchema: {
+      path: z.string().optional().describe('Folder to search (default: the phone storage)'),
+      limit: z.number().int().min(1).max(100).default(20),
+      extensions: z.array(z.string()).optional().describe('E.g. ["jpg","png"]. Use ["images"] for all image types.')
+    },
+    annotations: ro
+  }, wrap('recent_files', cfg, async ({ path: p, limit, extensions }) => {
+    const dir = p ? resolveReadable(cfg, p) : (roots[0] || resolveReadable(cfg, '.'));
+    if (!fs.statSync(dir).isDirectory()) return fail('Not a folder.');
+    const exts = extensions?.flatMap((e) => (e.toLowerCase() === 'images' ? IMAGE_EXTENSIONS : [e]));
+    const { files, truncated } = recentFiles(dir, { limit, extensions: exts });
+    if (!files.length) return text('(no matching files)');
+    const lines = files.map((f) => `${new Date(f.mtime).toISOString().replace('T', ' ').slice(0, 16)}  ${human(f.size).padStart(8)}  ${f.path}`);
+    if (truncated) lines.push('NOTE: the search stopped early; older folders may not have been checked.');
+    return text(lines.join('\n'));
+  }));
+
+  server.registerTool('view_image', {
+    title: 'View image',
+    description: `Shows an image from the phone so Claude can see it (${IMAGE_EXTENSIONS.join(', ')}). ` +
+      `Large photos are rotated and resized to at most ${cfg.imageMaxDimension}px. Use recent_files to find paths.${rootsNote}`,
+    inputSchema: { path: z.string().describe('Path of the image') },
+    annotations: ro
+  }, wrap('view_image', cfg, async ({ path: p }) => {
+    const file = resolveReadable(cfg, p);
+    const img = await loadImage(file, cfg, run);
+    return { content: [{ type: 'image', data: img.data, mimeType: img.mimeType }, { type: 'text', text: `${file}\n${img.note}` }] };
   }));
 
   if (cfg.allowWrite) {
     server.registerTool('write_file', {
-      title: 'Escribir archivo',
-      description: 'Crea o reemplaza un archivo de texto dentro de la carpeta de trabajo (crea las carpetas que falten).',
+      title: 'Write file',
+      description: 'Creates or replaces a text file inside the workspace (creates missing folders).',
       inputSchema: { path: z.string(), content: z.string(), append: z.boolean().default(false) },
       annotations: { destructiveHint: true, openWorldHint: false }
     }, wrap('write_file', cfg, async ({ path: p, content, append }) => {
-      if (Buffer.byteLength(content) > cfg.maxFileBytes) return fail(`Contenido demasiado grande (máx. ${cfg.maxFileBytes} B).`);
+      if (Buffer.byteLength(content) > cfg.maxFileBytes) return fail(`Content too large (max ${cfg.maxFileBytes} B).`);
       const file = resolveInWorkspace(cfg.workspace, p);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       if (append) fs.appendFileSync(file, content); else fs.writeFileSync(file, content);
-      return text(`${append ? 'Agregado a' : 'Escrito'}: ${path.relative(cfg.workspace, file)}`);
+      return text(`${append ? 'Appended to' : 'Wrote'}: ${path.relative(cfg.workspace, file)}`);
     }));
   }
 
   if (cfg.allowDelete) {
     server.registerTool('delete_file', {
-      title: 'Borrar archivo',
-      description: 'Borra un archivo (no carpetas) dentro de la carpeta de trabajo.',
+      title: 'Delete file',
+      description: 'Deletes a file (not a folder) inside the workspace.',
       inputSchema: { path: z.string() },
       annotations: { destructiveHint: true, openWorldHint: false }
     }, wrap('delete_file', cfg, async ({ path: p }) => {
       const file = resolveInWorkspace(cfg.workspace, p);
-      if (file === fs.realpathSync(cfg.workspace)) return fail('No se puede borrar la carpeta de trabajo.');
-      if (!fs.statSync(file).isFile()) return fail('Solo se pueden borrar archivos.');
+      if (file === fs.realpathSync(cfg.workspace)) return fail('The workspace itself cannot be deleted.');
+      if (!fs.statSync(file).isFile()) return fail('Only files can be deleted.');
       fs.unlinkSync(file);
-      return text(`Borrado: ${path.relative(cfg.workspace, file)}`);
+      return text(`Deleted: ${path.relative(cfg.workspace, file)}`);
     }));
   }
 
   server.registerTool('storage_overview', {
-    title: 'Resumen del almacenamiento',
-    description: 'Recorre una carpeta y resume en qué se usa el espacio: tamaño por subcarpeta, por tipo de archivo, ' +
-      'los archivos más grandes, archivos grandes viejos y posibles duplicados. Sin "path" analiza el almacenamiento compartido del celu. ' +
-      'Puede tardar hasta ~25 s en almacenamientos grandes.',
+    title: 'Storage overview',
+    description: 'Walks a folder and summarizes where the space goes: size per subfolder and per file type, ' +
+      'largest files, large old files and likely duplicates. Without "path" it analyzes the phone storage. ' +
+      'May take up to ~25 s on large storage.',
     inputSchema: {
-      path: z.string().optional().describe('Carpeta a analizar (por defecto, la primera carpeta de lectura)'),
+      path: z.string().optional().describe('Folder to analyze (default: the first read-only folder)'),
       top: z.number().int().min(5).max(50).default(15)
     },
     annotations: ro
   }, wrap('storage_overview', cfg, async ({ path: p, top }) => {
     const target = p ? resolveReadable(cfg, p) : (roots[0] || resolveReadable(cfg, '.'));
-    if (!fs.statSync(target).isDirectory()) return fail('No es una carpeta.');
+    if (!fs.statSync(target).isDirectory()) return fail('Not a folder.');
     return text(formatScan(scanStorage(target, { top }), top));
   }));
 
   server.registerTool('system_info', {
-    title: 'Datos del sistema',
-    description: 'Modelo, versión de Android, parche de seguridad, chip, RAM, almacenamiento, tiempo encendido y batería.',
+    title: 'System info',
+    description: 'Model, Android version, security patch, chip, RAM, storage, uptime and battery.',
     annotations: ro
-  }, wrap('system_info', cfg, async () => text(await systemInfo((prog, args) => runProgram(prog, args, cfg, { timeoutMs: prog.startsWith('termux-') ? API_TIMEOUT_MS : undefined })))));
+  }, wrap('system_info', cfg, async () => text(await systemInfo(run))));
 
   for (const t of TERMUX_API) {
     server.registerTool(t.name, { title: t.name, description: t.desc, annotations: ro },
-      wrap(t.name, cfg, async () => {
-        const r = await runProgram(t.program, [], cfg, { timeoutMs: API_TIMEOUT_MS });
-        return apiResult(r);
-      }));
+      wrap(t.name, cfg, async () => apiResult(await run(t.program, []))));
   }
 
   server.registerTool('notify', {
-    title: 'Notificación',
-    description: 'Muestra una notificación en el celular.',
+    title: 'Notification',
+    description: 'Shows a notification on the phone.',
     inputSchema: { title: z.string().max(100), content: z.string().max(1000) },
     annotations: { openWorldHint: false }
-  }, wrap('notify', cfg, async ({ title, content }) => {
-    const r = await runProgram('termux-notification', ['--title', title, '--content', content], cfg, { timeoutMs: API_TIMEOUT_MS });
-    return apiResult(r, 'Notificación enviada.');
-  }));
+  }, wrap('notify', cfg, async ({ title, content }) =>
+    apiResult(await run('termux-notification', ['--title', title, '--content', content]), 'Notification sent.')));
 
   server.registerTool('clipboard_set', {
-    title: 'Copiar al portapapeles',
-    description: 'Copia un texto al portapapeles del celular.',
+    title: 'Copy to clipboard',
+    description: "Copies text to the phone's clipboard.",
     inputSchema: { text: z.string().max(10000) },
     annotations: { openWorldHint: false }
-  }, wrap('clipboard_set', cfg, async ({ text: value }) => {
-    const r = await runProgram('termux-clipboard-set', [], cfg, { input: value, timeoutMs: API_TIMEOUT_MS });
-    return apiResult(r, 'Copiado.');
-  }));
+  }, wrap('clipboard_set', cfg, async ({ text: value }) =>
+    apiResult(await run('termux-clipboard-set', [], { input: value }), 'Copied.')));
 
   server.registerTool('vibrate', {
-    title: 'Vibrar',
-    description: 'Hace vibrar el celular.',
+    title: 'Vibrate',
+    description: 'Makes the phone vibrate.',
     inputSchema: { duration_ms: z.number().int().min(50).max(3000).default(500) },
     annotations: { openWorldHint: false }
-  }, wrap('vibrate', cfg, async ({ duration_ms }) => {
-    const r = await runProgram('termux-vibrate', ['-d', String(duration_ms), '-f'], cfg, { timeoutMs: API_TIMEOUT_MS });
-    return apiResult(r, 'Listo.');
-  }));
+  }, wrap('vibrate', cfg, async ({ duration_ms }) =>
+    apiResult(await run('termux-vibrate', ['-d', String(duration_ms), '-f']), 'Done.')));
 
   return server;
 }

@@ -1,4 +1,4 @@
-// Punto de entrada: servidor HTTP con OAuth + endpoint MCP (Streamable HTTP, sin estado).
+// Entry point: HTTP server with OAuth + MCP endpoint (Streamable HTTP, stateless).
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
@@ -13,11 +13,11 @@ function makeAudit(stateDir) {
   const file = path.join(stateDir, 'audit.log');
   return (entry) => {
     const e = { time: new Date().toISOString(), ...entry };
-    // No guardar contenidos completos en el log.
-    if (e.args?.content) e.args = { ...e.args, content: `<${e.args.content.length} caracteres>` };
-    if (e.args?.text) e.args = { ...e.args, text: `<${e.args.text.length} caracteres>` };
+    // Never store full contents in the log.
+    if (e.args?.content) e.args = { ...e.args, content: `<${e.args.content.length} characters>` };
+    if (e.args?.text) e.args = { ...e.args, text: `<${e.args.text.length} characters>` };
     fs.appendFileSync(file, JSON.stringify(e) + '\n', { mode: 0o600 });
-    if (e.event !== 'tool' || process.env.VERBOSE) console.log(`[${e.time}] ${e.event}${e.tool ? ' ' + e.tool : ''}${e.ok === false ? ' (falló)' : ''}`);
+    if (e.event !== 'tool' || process.env.VERBOSE) console.log(`[${e.time}] ${e.event}${e.tool ? ' ' + e.tool : ''}${e.ok === false ? ' (failed)' : ''}`);
   };
 }
 
@@ -28,10 +28,10 @@ export function createApp(cfg) {
 
   const app = express();
   app.disable('x-powered-by');
-  // cloudflared se conecta desde localhost; confiar solo en ese proxy.
+  // cloudflared connects from localhost; trust only that proxy.
   app.set('trust proxy', 'loopback');
 
-  // Registro de cada pedido (sin cuerpos ni tokens) para diagnosticar la conexión.
+  // Log every request (no bodies or tokens) to help diagnose connection problems.
   app.use((req, res, next) => {
     const t = Date.now();
     const json = res.json.bind(res);
@@ -46,14 +46,14 @@ export function createApp(cfg) {
 
   app.get('/health', (_req, res) => res.json({ ok: true }));
 
-  // Metadatos OAuth propios: issuer SIN barra final y en todas las rutas de
-  // descubrimiento que usan los distintos clientes (RFC 8414, RFC 9728 y OIDC).
+  // Our own OAuth metadata: issuer WITHOUT a trailing slash, served on every
+  // discovery path different clients use (RFC 8414, RFC 9728 and OIDC).
   const origin = cfg.publicUrl;
   const asMeta = {
     ...createOAuthMetadata({ provider, issuerUrl: new URL(origin), scopesSupported: ['mcp'] }),
     issuer: origin
   };
-  const prMeta = { resource: mcpUrl.href, authorization_servers: [origin], scopes_supported: ['mcp'], bearer_methods_supported: ['header'], resource_name: 'Celular (Termux)' };
+  const prMeta = { resource: mcpUrl.href, authorization_servers: [origin], scopes_supported: ['mcp'], bearer_methods_supported: ['header'], resource_name: 'Phone (Termux)' };
   const sendJson = (body) => (_req, res) => res.set('Cache-Control', 'no-store').set('Access-Control-Allow-Origin', '*').json(body);
   for (const p of ['/.well-known/oauth-authorization-server', '/.well-known/oauth-authorization-server/mcp', '/.well-known/openid-configuration', '/.well-known/openid-configuration/mcp', '/mcp/.well-known/openid-configuration']) {
     app.get(p, sendJson(asMeta));
@@ -66,7 +66,7 @@ export function createApp(cfg) {
     provider,
     issuerUrl: new URL(origin),
     resourceServerUrl: mcpUrl,
-    resourceName: 'Celular (Termux)',
+    resourceName: 'Phone (Termux)',
     scopesSupported: ['mcp']
   }));
 
@@ -85,12 +85,12 @@ export function createApp(cfg) {
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (e) {
-      console.error('Error MCP:', e);
-      if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Error interno' }, id: null });
+      console.error('MCP error:', e);
+      if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal error' }, id: null });
     }
   });
 
-  const notAllowed = (_req, res) => res.status(405).set('Allow', 'POST').json({ jsonrpc: '2.0', error: { code: -32000, message: 'Método no permitido.' }, id: null });
+  const notAllowed = (_req, res) => res.status(405).set('Allow', 'POST').json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null });
   app.get('/mcp', auth, notAllowed);
   app.delete('/mcp', auth, notAllowed);
 
@@ -101,11 +101,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const cfg = loadConfig();
   const { app } = createApp(cfg);
   const httpServer = app.listen(cfg.port, cfg.host, () => {
-    console.log(`termux-mcp escuchando en http://${cfg.host}:${cfg.port}`);
-    console.log(`URL del conector para claude.ai: ${cfg.publicUrl}/mcp`);
-    console.log(`Carpeta de trabajo: ${cfg.workspace}`);
+    console.log(`termux-mcp listening on http://${cfg.host}:${cfg.port}`);
+    console.log(`Connector URL for claude.ai: ${cfg.publicUrl}/mcp`);
+    console.log(`Workspace: ${cfg.workspace}`);
   });
-  const stop = () => { console.log('Apagando…'); httpServer.close(() => process.exit(0)); setTimeout(() => process.exit(0), 2000).unref(); };
+  const stop = () => { console.log('Shutting down…'); httpServer.close(() => process.exit(0)); setTimeout(() => process.exit(0), 2000).unref(); };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
 }

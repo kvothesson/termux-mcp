@@ -1,6 +1,6 @@
 {
   "port": 8787,
-  "pin": "CAMBIAR-ESTE-PIN",
+  "pin": "CHANGE-THIS-PIN",
   "workspace": "~/claude-workspace",
   "readRoots": [
     "~/storage/shared"
@@ -39,5 +39,7 @@
   "maxOutputBytes": 65536,
   "accessTokenTtlMin": 60,
   "refreshTokenTtlDays": 30,
-  "maxPinAttempts": 5
+  "maxPinAttempts": 5,
+  "maxImageBytes": 31457280,
+  "imageMaxDimension": 1280
 }

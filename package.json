@@ -1,7 +1,7 @@
 {
   "name": "termux-mcp",
-  "version": "0.1.0",
-  "description": "Servidor MCP para controlar un celular Android (Termux) desde claude.ai",
+  "version": "0.3.0",
+  "description": "MCP server to control an Android phone (Termux) from claude.ai",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
