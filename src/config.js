@@ -12,12 +12,16 @@ export const DEFAULTS = {
   host: '127.0.0.1',
   // Carpeta a la que se limitan las herramientas de archivos y el cwd de los comandos.
   workspace: '~/claude-workspace',
+  // Carpetas extra que se pueden LEER (nunca escribir). ~/storage/shared aparece
+  // después de correr termux-setup-storage y es el almacenamiento interno del celu.
+  readRoots: ['~/storage/shared'],
   // Carpeta de estado (clientes OAuth, tokens, log de auditoría).
   stateDir: '~/.termux-mcp',
   // Solo estos programas se pueden ejecutar con run_command.
   allowedCommands: [
     'ls', 'cat', 'head', 'tail', 'wc', 'grep', 'find', 'du', 'df', 'pwd',
     'date', 'uptime', 'whoami', 'uname', 'echo', 'stat', 'file', 'sort', 'uniq',
+    'getprop', 'free', 'nproc',
     'termux-battery-status', 'termux-wifi-connectioninfo', 'termux-telephony-deviceinfo'
   ],
   allowWrite: true,

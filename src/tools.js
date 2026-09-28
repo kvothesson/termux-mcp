@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { checkCommand, resolveInWorkspace, SafetyError } from './safety.js';
+import { checkCommand, readableRoots, resolveInWorkspace, resolveReadable, SafetyError } from './safety.js';
+import { formatScan, scanStorage, systemInfo } from './inspect.js';
 
 const text = (t) => ({ content: [{ type: 'text', text: t }] });
 const fail = (t) => ({ content: [{ type: 'text', text: t }], isError: true });
@@ -62,13 +63,17 @@ const TERMUX_API = [
 ];
 
 export function buildServer(cfg) {
-  const server = new McpServer({ name: 'termux-mcp', version: '0.1.0' });
+  const server = new McpServer({ name: 'termux-mcp', version: '0.2.0' });
   const ro = { readOnlyHint: true, openWorldHint: false };
+  const roots = readableRoots(cfg);
+  const rootsNote = roots.length
+    ? ` También se puede LEER (no escribir) usando rutas absolutas dentro de: ${roots.join(', ')} (almacenamiento del celu).`
+    : ' No hay carpetas extra de lectura (falta correr termux-setup-storage).';
 
   server.registerTool('run_command', {
     title: 'Ejecutar comando',
     description: `Ejecuta un comando de la lista blanca en el celular (sin shell: no hay pipes, redirecciones ni variables). ` +
-      `El directorio actual es la carpeta de trabajo y las rutas deben quedar dentro de ella. ` +
+      `El directorio actual es la carpeta de trabajo (${cfg.workspace}).${rootsNote} ` +
       `Permitidos: ${cfg.allowedCommands.join(', ')}.`,
     inputSchema: { command: z.string().describe('Ej.: "ls -la notas"') },
     annotations: { destructiveHint: false, openWorldHint: false }
@@ -80,11 +85,11 @@ export function buildServer(cfg) {
 
   server.registerTool('list_dir', {
     title: 'Listar carpeta',
-    description: 'Lista el contenido de una carpeta dentro de la carpeta de trabajo.',
-    inputSchema: { path: z.string().default('.').describe('Ruta relativa a la carpeta de trabajo') },
+    description: `Lista una carpeta. Rutas relativas = carpeta de trabajo.${rootsNote}`,
+    inputSchema: { path: z.string().default('.').describe('Relativa a la carpeta de trabajo, o absoluta dentro de una carpeta de lectura') },
     annotations: ro
   }, wrap('list_dir', cfg, async ({ path: p }) => {
-    const dir = resolveInWorkspace(cfg.workspace, p);
+    const dir = resolveReadable(cfg, p);
     const entries = fs.readdirSync(dir, { withFileTypes: true }).map((d) => {
       const full = path.join(dir, d.name);
       let size = '';
@@ -96,11 +101,11 @@ export function buildServer(cfg) {
 
   server.registerTool('read_file', {
     title: 'Leer archivo',
-    description: 'Lee un archivo de texto dentro de la carpeta de trabajo.',
+    description: `Lee un archivo de texto. Rutas relativas = carpeta de trabajo.${rootsNote}`,
     inputSchema: { path: z.string() },
     annotations: ro
   }, wrap('read_file', cfg, async ({ path: p }) => {
-    const file = resolveInWorkspace(cfg.workspace, p);
+    const file = resolveReadable(cfg, p);
     const st = fs.statSync(file);
     if (!st.isFile()) return fail('No es un archivo.');
     if (st.size > cfg.maxFileBytes) return fail(`El archivo pesa ${st.size} B; el máximo es ${cfg.maxFileBytes} B.`);
@@ -136,6 +141,28 @@ export function buildServer(cfg) {
       return text(`Borrado: ${path.relative(cfg.workspace, file)}`);
     }));
   }
+
+  server.registerTool('storage_overview', {
+    title: 'Resumen del almacenamiento',
+    description: 'Recorre una carpeta y resume en qué se usa el espacio: tamaño por subcarpeta, por tipo de archivo, ' +
+      'los archivos más grandes, archivos grandes viejos y posibles duplicados. Sin "path" analiza el almacenamiento compartido del celu. ' +
+      'Puede tardar hasta ~25 s en almacenamientos grandes.',
+    inputSchema: {
+      path: z.string().optional().describe('Carpeta a analizar (por defecto, la primera carpeta de lectura)'),
+      top: z.number().int().min(5).max(50).default(15)
+    },
+    annotations: ro
+  }, wrap('storage_overview', cfg, async ({ path: p, top }) => {
+    const target = p ? resolveReadable(cfg, p) : (roots[0] || resolveReadable(cfg, '.'));
+    if (!fs.statSync(target).isDirectory()) return fail('No es una carpeta.');
+    return text(formatScan(scanStorage(target, { top }), top));
+  }));
+
+  server.registerTool('system_info', {
+    title: 'Datos del sistema',
+    description: 'Modelo, versión de Android, parche de seguridad, chip, RAM, almacenamiento, tiempo encendido y batería.',
+    annotations: ro
+  }, wrap('system_info', cfg, async () => text(await systemInfo((prog, args) => runProgram(prog, args, cfg)))));
 
   for (const t of TERMUX_API) {
     server.registerTool(t.name, { title: t.name, description: t.desc, annotations: ro },

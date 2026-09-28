@@ -13,13 +13,15 @@ El servidor solo escucha en el propio celu (127.0.0.1). La única entrada desde 
 | Herramienta | Qué hace |
 |---|---|
 | `run_command` | Ejecuta comandos de la **lista blanca**, sin shell (sin pipes, `;`, `>`, `$`) |
-| `list_dir`, `read_file` | Lee dentro de la carpeta de trabajo (`~/claude-workspace`) |
+| `list_dir`, `read_file` | Lee la carpeta de trabajo (`~/claude-workspace`) y, en **solo lectura**, el almacenamiento del celu (`~/storage/shared`) |
+| `storage_overview` | Resume el almacenamiento: espacio por carpeta y por tipo, archivos más grandes, grandes y viejos, posibles duplicados |
+| `system_info` | Modelo, Android, parche de seguridad, chip, RAM, disco, tiempo encendido, batería |
 | `write_file` | Crea o modifica archivos en la carpeta de trabajo (se puede apagar) |
 | `delete_file` | Borra archivos. **Apagado por defecto** (`allowDelete`) |
 | `battery_status`, `wifi_info`, `clipboard_get` | Datos del celu vía Termux:API |
 | `notify`, `clipboard_set`, `vibrate` | Notificación, copiar texto, vibrar |
 
-No puede tocar la pantalla ni manejar otras apps (Android no lo permite sin root).
+No puede tocar la pantalla, manejar otras apps, ver datos internos de otras apps ni qué apps gastan batería o RAM: Android no lo permite sin root (con ADB desde una PC sí).
 
 ## Seguridad
 
@@ -27,7 +29,7 @@ No puede tocar la pantalla ni manejar otras apps (Android no lo permite sin root
 - 5 PIN incorrectos → bloqueo de 15 minutos.
 - Tokens guardados solo como hash; access token de 60 min, refresh token de 30 días con rotación.
 - Lista blanca de comandos y bloqueo de opciones peligrosas (`find -exec`, `-delete`, etc.).
-- Cualquier ruta, en archivos o en argumentos de comandos, tiene que quedar dentro de la carpeta de trabajo (también se controlan los symlinks).
+- Escritura solo en la carpeta de trabajo. El almacenamiento del celu (`readRoots`) es de **solo lectura**; cualquier otra ruta está bloqueada, incluso en argumentos de comandos (también se controlan los symlinks).
 - Log de todo lo que se ejecuta en `~/.termux-mcp/audit.log`.
 - **Kill switch**: `./scripts/stop.sh` apaga todo al instante.
 
@@ -46,7 +48,7 @@ No puede tocar la pantalla ni manejar otras apps (Android no lo permite sin root
 
    El repo es privado: `git clone` te pide usuario y contraseña. La contraseña **no** es la de tu cuenta: es un token que creás en github.com → Settings → Developer settings → Personal access tokens → *Fine-grained*, con acceso de solo lectura a este repo.
 
-   `setup.sh` instala Node, cloudflared y termux-api, y te pide que elijas el **PIN** (mínimo 8 caracteres; mejor una frase).
+   `setup.sh` instala Node, cloudflared y termux-api, te pide que elijas el **PIN** (mínimo 8 caracteres; mejor una frase) y corre `termux-setup-storage` para dar acceso de lectura al almacenamiento (Android pide permiso: tocá *Permitir*).
 
 ## Uso
 
@@ -85,7 +87,8 @@ CF_TUNNEL_TOKEN=tu-token ./scripts/start.sh
 | Clave | Por defecto | |
 |---|---|---|
 | `pin` | — | Obligatorio, mínimo 8 caracteres |
-| `workspace` | `~/claude-workspace` | Única carpeta accesible |
+| `workspace` | `~/claude-workspace` | Única carpeta con escritura |
+| `readRoots` | `["~/storage/shared"]` | Carpetas de solo lectura. `[]` para quitar el acceso al almacenamiento |
 | `allowedCommands` | `ls`, `cat`, `grep`, … | Lista blanca |
 | `allowWrite` | `true` | Habilita `write_file` |
 | `allowDelete` | `false` | Habilita `delete_file` |
@@ -104,7 +107,7 @@ Después de cambiar la configuración: `./scripts/stop.sh && ./scripts/start.sh`
 ## Riesgos
 
 - Estás exponiendo parte de tu celu a internet. El PIN es lo que lo protege: usá uno largo y no lo compartas.
-- Cualquier comando de la lista blanca puede leer lo que haya en la carpeta de trabajo. No pongas ahí nada que no quieras que Claude vea.
+- Con `readRoots` activo, Claude puede **leer** todo el almacenamiento compartido: fotos, descargas, documentos, backups de WhatsApp. Si no querés eso, poné `"readRoots": []`.
 - Agregar comandos a la lista blanca amplía lo que se puede hacer. Nunca agregues `sh`, `bash`, `node`, `python`, `rm`, `curl` ni similares: equivalen a darle una terminal completa.
 - Si ves en el log algo que no pediste, apagalo y revocá los tokens.
 

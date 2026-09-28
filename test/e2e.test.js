@@ -14,7 +14,15 @@ const REDIRECT = 'https://claude.ai/api/mcp/auth_callback';
 
 before(async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tmcp-'));
-  cfg = { ...DEFAULTS, pin: PIN, workspace: path.join(tmp, 'ws'), stateDir: path.join(tmp, 'state'), audit: () => {} };
+  const shared = path.join(tmp, 'shared');
+  cfg = { ...DEFAULTS, pin: PIN, workspace: path.join(tmp, 'ws'), stateDir: path.join(tmp, 'state'), readRoots: [shared], audit: () => {} };
+  cfg.shared = shared;
+  fs.mkdirSync(path.join(shared, 'DCIM/Camera'), { recursive: true });
+  fs.mkdirSync(path.join(shared, 'Download'), { recursive: true });
+  fs.writeFileSync(path.join(shared, 'DCIM/Camera/foto.jpg'), Buffer.alloc(3 * 1024 * 1024));
+  fs.writeFileSync(path.join(shared, 'Download/foto.jpg'), Buffer.alloc(3 * 1024 * 1024));
+  fs.writeFileSync(path.join(shared, 'Download/app.apk'), Buffer.alloc(5 * 1024 * 1024));
+  fs.writeFileSync(path.join(shared, 'Download/leeme.txt'), 'texto compartido');
   fs.mkdirSync(cfg.workspace);
   fs.mkdirSync(cfg.stateDir);
   fs.writeFileSync(path.join(cfg.workspace, 'hola.txt'), 'hola mundo\n');
@@ -99,7 +107,7 @@ test('flujo completo: PIN, token y herramientas', async () => {
 
   const list = await rpc(access_token, 'tools/list');
   const names = list.result.tools.map((t) => t.name);
-  for (const n of ['run_command', 'read_file', 'write_file', 'list_dir', 'battery_status', 'notify']) assert.ok(names.includes(n), n);
+  for (const n of ['run_command', 'read_file', 'write_file', 'list_dir', 'battery_status', 'notify', 'storage_overview', 'system_info']) assert.ok(names.includes(n), n);
   assert.ok(!names.includes('delete_file'), 'borrar está apagado por defecto');
 
   const call = (name, args) => rpc(access_token, 'tools/call', { name, arguments: args }).then((r) => r.result);
@@ -119,6 +127,28 @@ test('flujo completo: PIN, token y herramientas', async () => {
   assert.ok(r.isError);
   r = await call('list_dir', { path: '.' });
   assert.match(r.content[0].text, /notas/);
+
+  // Almacenamiento compartido: se lee, no se escribe.
+  r = await call('read_file', { path: path.join(cfg.shared, 'Download/leeme.txt') });
+  assert.equal(r.content[0].text, 'texto compartido');
+  r = await call('list_dir', { path: path.join(cfg.shared, 'Download') });
+  assert.match(r.content[0].text, /app\.apk/);
+  r = await call('write_file', { path: path.join(cfg.shared, 'Download/x.txt'), content: 'no' });
+  assert.ok(r.isError);
+  assert.ok(!fs.existsSync(path.join(cfg.shared, 'Download/x.txt')));
+  r = await call('run_command', { command: `ls ${path.join(cfg.shared, 'DCIM')}` });
+  assert.match(r.content[0].text, /Camera/);
+
+  r = await call('storage_overview', {});
+  assert.ok(!r.isError, r.content[0].text);
+  assert.match(r.content[0].text, /Download/);
+  assert.match(r.content[0].text, /Instaladores \(APK\)/);
+  assert.match(r.content[0].text, /Posibles duplicados.*1 grupos/);
+
+  r = await call('system_info', {});
+  assert.ok(!r.isError);
+  assert.match(r.content[0].text, /## Memoria/);
+  assert.match(r.content[0].text, /RAM/);
 
   // Termux:API no existe acá: debe fallar prolijo, sin tirar el servidor.
   r = await call('battery_status', {});

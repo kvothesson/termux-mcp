@@ -32,6 +32,13 @@ else
 fi
 
 mkdir -p ~/claude-workspace
+
+if [ ! -d ~/storage/shared ]; then
+  echo
+  echo "==> Acceso de LECTURA al almacenamiento del celu (para analizar espacio y carpetas)."
+  echo "    Android te va a pedir permiso: tocá Permitir."
+  termux-setup-storage || true
+fi
 echo
 echo "Listo. Para arrancar:  ./scripts/start.sh"
 echo "Importante: abrí una vez la app Termux:API y dale los permisos que pida."
