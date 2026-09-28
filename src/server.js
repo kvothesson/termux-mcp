@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
-import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
+import { createOAuthMetadata, mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { loadConfig } from './config.js';
@@ -46,9 +46,25 @@ export function createApp(cfg) {
 
   app.get('/health', (_req, res) => res.json({ ok: true }));
 
+  // Metadatos OAuth propios: issuer SIN barra final y en todas las rutas de
+  // descubrimiento que usan los distintos clientes (RFC 8414, RFC 9728 y OIDC).
+  const origin = cfg.publicUrl;
+  const asMeta = {
+    ...createOAuthMetadata({ provider, issuerUrl: new URL(origin), scopesSupported: ['mcp'] }),
+    issuer: origin
+  };
+  const prMeta = { resource: mcpUrl.href, authorization_servers: [origin], scopes_supported: ['mcp'], bearer_methods_supported: ['header'], resource_name: 'Celular (Termux)' };
+  const sendJson = (body) => (_req, res) => res.set('Cache-Control', 'no-store').set('Access-Control-Allow-Origin', '*').json(body);
+  for (const p of ['/.well-known/oauth-authorization-server', '/.well-known/oauth-authorization-server/mcp', '/.well-known/openid-configuration', '/.well-known/openid-configuration/mcp', '/mcp/.well-known/openid-configuration']) {
+    app.get(p, sendJson(asMeta));
+  }
+  for (const p of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp']) {
+    app.get(p, sendJson(prMeta));
+  }
+
   app.use(mcpAuthRouter({
     provider,
-    issuerUrl: new URL(cfg.publicUrl),
+    issuerUrl: new URL(origin),
     resourceServerUrl: mcpUrl,
     resourceName: 'Celular (Termux)',
     scopesSupported: ['mcp']
