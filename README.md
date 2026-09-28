@@ -31,7 +31,7 @@ What it **cannot** do: look at images (only list them), tap the screen, control 
 - **OAuth with a PIN**: when connecting, claude.ai opens a page where you type your PIN. No PIN, no access.
 - 5 wrong PINs → approvals are locked for 15 minutes.
 - Tokens are stored only as hashes; 60-minute access tokens, 30-day refresh tokens with rotation.
-- Command allowlist, and dangerous options are blocked (`find -exec`, `-delete`, etc.).
+- Command allowlist, and options that could write or execute are blocked in every form — spaced, `--long=…` or glued to the flag (`find -exec`/`-delete`, `sort -o`/`--compress-program`, `file -f`, and a write output operand for `uniq`).
 - Writes only inside the workspace. The phone storage (`readRoots`) is **read-only**; every other path is blocked, including in command arguments (symlinks are checked too).
 - Every tool call is logged to `~/.termux-mcp/audit.log`.
 - Hung commands (e.g. an unresponsive Termux:API) are killed on a timeout instead of blocking the server.

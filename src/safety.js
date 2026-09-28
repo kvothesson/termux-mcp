@@ -91,20 +91,52 @@ export function splitArgs(line) {
   return args;
 }
 
-// Options that turn a "harmless" command into one that executes, deletes or writes.
+// Options that turn a "harmless" command into one that executes, writes or reads
+// an arbitrary path. Coreutils are surprisingly capable: sort can write with -o
+// and run any program with --compress-program; file can read a list of targets
+// with -f. These are blocked whatever their form (--flag, --flag=x, -ox, -o x).
 const DANGEROUS_FLAGS = {
-  find: ['-exec', '-execdir', '-ok', '-okdir', '-delete', '-fprint', '-fprint0', '-fprintf', '-fls'],
-  sort: ['-o', '--output'],
-  file: ['-C', '--compile', '-m', '--magic-file']
+  find: ['-exec', '-execdir', '-ok', '-okdir', '-delete', '-fprint', '-fprint0', '-fprintf', '-fls', '-files0-from'],
+  sort: ['-o', '--output', '--compress-program', '--files0-from'],
+  uniq: [], // its output-file operand is handled below (WRITE_POSITIONAL).
+  file: ['-C', '--compile', '-m', '--magic-file', '-f', '--files-from']
 };
+
+// Commands whose SECOND (and later) file operand is an OUTPUT file they write.
+// A read-only tool must never be handed such a path, so we forbid the operand
+// outright: the single-input form (the useful one) still works.
+const WRITE_POSITIONAL = new Set(['uniq']);
 
 function looksLikePath(a) {
   return a.startsWith('/') || a.startsWith('~') || a.startsWith('.') || a.includes('/');
 }
 
 /**
+ * Every flag token a single argument stands for, so the denylist catches
+ * grouped and glued forms: "--output=x" -> ["--output"], "-ox" -> ["-o", …],
+ * "-ru" -> ["-r", "-u"]. Over-approximating (treating later glued letters as
+ * flags too) only ever blocks more, which is the safe direction here.
+ */
+function flagTokens(a) {
+  const bare = a.split('=')[0];
+  if (a.startsWith('--')) return [bare];
+  // Single dash covers both find-style long options ("-exec", "-delete") and
+  // short clusters/glued values ("-ru", "-ox"). Test the whole token and every
+  // "-<letter>" it contains, so any of those forms hits the denylist.
+  return [bare, ...[...a.slice(1)].map((ch) => '-' + ch)];
+}
+
+/** The path a flag argument points at, if any: "--out=x" -> "x", "-ox" -> "x". */
+function embeddedValue(a) {
+  if (a.startsWith('--')) return a.includes('=') ? a.slice(a.indexOf('=') + 1) : null;
+  const rest = a.slice(2); // everything after "-X"
+  return rest.length ? rest : null;
+}
+
+/**
  * Checks a command against the allowlist and returns { program, args } ready to spawn.
- * Arguments that look like paths must fall inside the allowed folders.
+ * Arguments that look like paths must fall inside the allowed folders, and options
+ * that could write or execute (in any form) are rejected.
  */
 export function checkCommand(line, cfg) {
   const [program, ...args] = splitArgs(line);
@@ -113,15 +145,24 @@ export function checkCommand(line, cfg) {
     throw new SafetyError(`"${program}" is not on the allowlist. Allowed: ${cfg.allowedCommands.join(', ')}`);
   }
   const banned = DANGEROUS_FLAGS[program] || [];
+  let operands = 0;
   for (const a of args) {
-    const flag = a.split('=')[0];
-    if (banned.includes(flag)) throw new SafetyError(`Option "${flag}" is not allowed with ${program}.`);
-    if (!cfg.allowPathsOutsideWorkspace) {
-      const value = a.startsWith('-') && a.includes('=') ? a.slice(a.indexOf('=') + 1) : a;
-      if (!a.startsWith('-') || a.includes('=')) {
-        if (looksLikePath(value)) resolveReadable(cfg, value);
+    if (a.startsWith('-') && a !== '-') {
+      for (const flag of flagTokens(a)) {
+        if (banned.includes(flag)) throw new SafetyError(`Option "${flag}" is not allowed with ${program}.`);
       }
+      if (!cfg.allowPathsOutsideWorkspace) {
+        const value = embeddedValue(a);
+        if (value && looksLikePath(value)) resolveReadable(cfg, value);
+      }
+      continue;
     }
+    // Positional operand ("-" means stdin and is not a path).
+    operands++;
+    if (WRITE_POSITIONAL.has(program) && operands >= 2) {
+      throw new SafetyError(`"${program}" is only allowed with a single input file; its output-file operand can write outside the workspace.`);
+    }
+    if (!cfg.allowPathsOutsideWorkspace && a !== '-' && looksLikePath(a)) resolveReadable(cfg, a);
   }
   return { program, args };
 }
